@@ -49,6 +49,29 @@ python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Reproducible multi-stock scan
+
+The ML Classifier uses a purged walk-forward loop: 200 bars of warm-up, a maximum
+1,000-bar causal training window, and retraining every 200 bars. The original label
+formula is unchanged, and its threshold is frozen from pre-roll history. XGBoost
+receives the per-fold negative/positive class ratio as `scale_pos_weight`; folds with
+one class are recorded as skipped rather than silently replaced by another model.
+
+To produce the report matrix on live Yahoo Finance data:
+
+```bash
+python run_parameter_scan.py --output-dir analysis_results/scan_YYYYMMDD_HHMMSS
+```
+
+The scanner downloads one 60-day/5-minute snapshot per ticker, evaluates the latest
+30 calendar days, and fails if any ticker falls back to demo data. It writes the
+frozen OHLCV snapshots, `data_manifest.json`, `scan_runs_long.csv`,
+`parameter_stock_matrix.csv`, `parameter_window_summary.csv`,
+`ml_fold_diagnostics.csv`, `all_trades.csv`, and `summary.md`. Every completed trade,
+including losses, remains in `all_trades.csv`. Historical Yahoo news snapshots are
+not available, so the scan uses an explicitly recorded neutral news score instead of
+leaking current headlines into past bars.
+
 ## Data Notes
 
 The app uses `yfinance` for intraday OHLCV data. Yahoo Finance availability for 1-minute candles is limited, so 3-month/1-minute requests may be automatically reduced or may fall back to demo data if the provider does not return enough bars.
