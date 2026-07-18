@@ -1,5 +1,7 @@
 # AI Intraday Quant Trading Simulator
 
+**Live app:** https://5557-must-group.streamlit.app/
+
 An AI-powered finance application for intraday trading education. Users select a ticker, time range, candle interval, and strategy. The app loads minute-level OHLCV data, calculates short-term indicators, predicts short-horizon price direction, generates Buy/Sell/Hold signals, runs a backtest, and visualises trading performance.
 
 ## Features

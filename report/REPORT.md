@@ -2,13 +2,13 @@
 
 **FINS5557 Applied AI in Finance — Part A (Tech Team) Written Report**
 
-**Live application:** [DEPLOYMENT URL — add after Streamlit Cloud deploy]
+**Live application:** https://5557-must-group.streamlit.app/
 **Source code:** https://github.com/StarSharkk/5557-MUST-Group
 
 > **DRAFT STATUS — before submission the team must:**
 > 1. Complete the user testing in §d.3 with at least 3 real users (do **not** submit with the placeholder).
 > 2. Verify every reference in §f against the original source and fix any details.
-> 3. Fill in the contribution statement and the deployment URL.
+> 3. Fill in the contribution statement.
 > 4. Convert to the required document format and check the 15-page limit.
 
 ---
