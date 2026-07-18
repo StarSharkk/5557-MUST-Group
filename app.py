@@ -1,0 +1,1093 @@
+from __future__ import annotations
+
+import math
+import re
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+except Exception:  # pragma: no cover - handled in UI
+    go = None
+    px = None
+
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover - handled in UI
+    yf = None
+
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+except Exception:  # pragma: no cover - handled in UI
+    RandomForestClassifier = None
+    LogisticRegression = None
+    accuracy_score = None
+    f1_score = None
+    make_pipeline = None
+    StandardScaler = None
+
+APP_TITLE = "AI Intraday Quant Trading Simulator"
+TICKERS = ["AAPL", "TSLA", "NVDA", "CBA.AX"]
+MINI_TRADINGAGENTS_STRATEGY = "Mini TradingAgents"
+MULTIFACTOR_STRATEGY = "Multi-factor model"
+FREQTRADE_STRATEGY = "Freqtrade Sample Strategy"
+STRATEGIES = [MINI_TRADINGAGENTS_STRATEGY, MULTIFACTOR_STRATEGY, FREQTRADE_STRATEGY]
+FREQTRADE_BUY_RSI = 30
+FREQTRADE_SELL_RSI = 70
+MULTIFACTOR_BUY_THRESHOLD = 0.35
+MULTIFACTOR_SELL_THRESHOLD = -0.35
+TEAM_BUY_THRESHOLD = 0.20
+TEAM_SELL_THRESHOLD = -0.15
+FEATURE_COLUMNS = [
+    "return_1",
+    "return_3",
+    "return_6",
+    "rsi",
+    "macd_hist",
+    "bb_percent",
+    "volatility",
+    "volume_spike",
+    "ma_gap",
+    "vwap_gap",
+]
+
+
+@dataclass
+class ModelResult:
+    probability: pd.Series
+    latest_probability: float
+    accuracy: float | None
+    f1: float | None
+    feature_importance: pd.Series
+    model_name: str
+    fallback: bool = False
+
+
+st.set_page_config(page_title=APP_TITLE, page_icon="chart_with_upwards_trend", layout="wide")
+
+
+def clean_ticker(ticker: str) -> str:
+    ticker = ticker.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", ticker):
+        raise ValueError("Ticker contains invalid characters.")
+    return ticker
+
+
+def crossed_above(series: pd.Series, threshold: float) -> pd.Series:
+    previous = series.shift(1)
+    return (series > threshold) & (previous <= threshold)
+
+
+def rolling_zscore(series: pd.Series, window: int = 80) -> pd.Series:
+    mean = series.rolling(window).mean()
+    std = series.rolling(window).std().replace(0, np.nan)
+    return ((series - mean) / std).replace([np.inf, -np.inf], np.nan).fillna(0)
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def load_price_data(ticker: str, months: int, interval: str) -> Tuple[pd.DataFrame, str]:
+    ticker = clean_ticker(ticker)
+    period = "1mo" if months == 1 else "3mo"
+
+    if yf is None:
+        return make_demo_data(ticker, months, interval), "demo: yfinance is not installed"
+
+    try:
+        data = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+    except Exception as exc:
+        return make_demo_data(ticker, months, interval), f"demo: yfinance request failed ({exc})"
+
+    if data is None or data.empty:
+        return make_demo_data(ticker, months, interval), "demo: provider returned no intraday bars"
+
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    data = data.rename(columns=str.lower)
+    required = ["open", "high", "low", "close", "volume"]
+    if not all(col in data.columns for col in required):
+        return make_demo_data(ticker, months, interval), "demo: provider response missing OHLCV columns"
+
+    data = data[required].copy()
+    data.index = pd.to_datetime(data.index)
+    data = data.dropna()
+    data = data[data["volume"] >= 0]
+
+    if len(data) < 120:
+        return make_demo_data(ticker, months, interval), "demo: not enough intraday bars for modelling"
+
+    return data, "live: yfinance intraday OHLCV"
+
+
+def make_demo_data(ticker: str, months: int, interval: str) -> pd.DataFrame:
+    seed = abs(hash((ticker, months, interval))) % (2**32)
+    rng = np.random.default_rng(seed)
+    bars_per_day = 390 if interval == "1m" else 78
+    days = 21 if months == 1 else 63
+    total = bars_per_day * days
+    freq = "1min" if interval == "1m" else "5min"
+    idx = pd.date_range(end=pd.Timestamp.now().floor("min"), periods=total, freq=freq)
+
+    base_price = {"AAPL": 195, "TSLA": 240, "NVDA": 125, "CBA.AX": 120}.get(ticker, 100)
+    drift = {"AAPL": 0.000005, "TSLA": 0.00001, "NVDA": 0.000012, "CBA.AX": 0.000003}.get(ticker, 0)
+    shock = rng.normal(drift, 0.0018 if ticker in {"TSLA", "NVDA"} else 0.0011, total)
+    close = base_price * np.exp(np.cumsum(shock))
+    open_ = np.r_[close[0], close[:-1]] * (1 + rng.normal(0, 0.00025, total))
+    spread = np.abs(rng.normal(0.0009, 0.00035, total))
+    high = np.maximum(open_, close) * (1 + spread)
+    low = np.minimum(open_, close) * (1 - spread)
+    volume = rng.lognormal(12.3 if ticker != "CBA.AX" else 11.3, 0.45, total).astype(int)
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+        index=idx,
+    )
+
+
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    typical_price = (out["high"] + out["low"] + out["close"]) / 3
+    out["vwap"] = (typical_price * out["volume"]).cumsum() / out["volume"].replace(0, np.nan).cumsum()
+    out["vwap_gap"] = out["close"] / out["vwap"] - 1
+
+    out["return_1"] = out["close"].pct_change()
+    out["return_3"] = out["close"].pct_change(3)
+    out["return_6"] = out["close"].pct_change(6)
+
+    delta = out["close"].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.replace(0, np.nan)
+    out["rsi"] = 100 - (100 / (1 + rs))
+
+    ema12 = out["close"].ewm(span=12, adjust=False).mean()
+    ema26 = out["close"].ewm(span=26, adjust=False).mean()
+    out["macd"] = ema12 - ema26
+    out["macd_signal"] = out["macd"].ewm(span=9, adjust=False).mean()
+    out["macd_hist"] = out["macd"] - out["macd_signal"]
+
+    rolling_mean = out["close"].rolling(20).mean()
+    rolling_std = out["close"].rolling(20).std()
+    out["bb_middle"] = rolling_mean
+    out["bb_upper"] = rolling_mean + 2 * rolling_std
+    out["bb_lower"] = rolling_mean - 2 * rolling_std
+    out["bb_percent"] = (out["close"] - out["bb_lower"]) / (out["bb_upper"] - out["bb_lower"])
+    out["z_score"] = (out["close"] - rolling_mean) / rolling_std
+
+    out["volatility"] = out["return_1"].rolling(20).std()
+    volume_avg = out["volume"].rolling(20).mean()
+    out["volume_spike"] = out["volume"] / volume_avg.replace(0, np.nan)
+
+    out["ma_fast"] = out["close"].rolling(8).mean()
+    out["ma_slow"] = out["close"].rolling(21).mean()
+    out["ma_gap"] = out["ma_fast"] / out["ma_slow"] - 1
+    out["ma_cross"] = np.sign(out["ma_gap"]).diff().fillna(0)
+
+    ema1 = out["close"].ewm(span=9, adjust=False).mean()
+    ema2 = ema1.ewm(span=9, adjust=False).mean()
+    ema3 = ema2.ewm(span=9, adjust=False).mean()
+    out["tema"] = 3 * (ema1 - ema2) + ema3
+
+    return out.replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def make_labels(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
+    out = df.copy()
+    out["future_return"] = out["close"].shift(-horizon_bars) / out["close"] - 1
+    threshold = max(out["return_1"].std() * math.sqrt(horizon_bars) * 0.25, 0.0005)
+    out["target"] = np.where(out["future_return"] > threshold, 1, 0)
+    return out.dropna()
+
+
+def train_predict_model(df: pd.DataFrame, model_choice: str, horizon_bars: int) -> ModelResult:
+    labelled = make_labels(df, horizon_bars)
+    if len(labelled) < 160 or RandomForestClassifier is None:
+        probability = heuristic_probability(df)
+        return ModelResult(
+            probability=probability,
+            latest_probability=float(probability.iloc[-1]),
+            accuracy=None,
+            f1=None,
+            feature_importance=heuristic_importance(df),
+            model_name="Heuristic fallback",
+            fallback=True,
+        )
+
+    split = int(len(labelled) * 0.7)
+    train = labelled.iloc[:split]
+    test = labelled.iloc[split:]
+    X_train = train[FEATURE_COLUMNS]
+    y_train = train["target"].astype(int)
+    X_test = test[FEATURE_COLUMNS]
+    y_test = test["target"].astype(int)
+
+    if y_train.nunique() < 2:
+        probability = heuristic_probability(df)
+        return ModelResult(
+            probability=probability,
+            latest_probability=float(probability.iloc[-1]),
+            accuracy=None,
+            f1=None,
+            feature_importance=heuristic_importance(df),
+            model_name="Heuristic fallback",
+            fallback=True,
+        )
+
+    model_name = model_choice
+    if model_choice == "XGBoost":
+        try:
+            from xgboost import XGBClassifier
+        except Exception:
+            XGBClassifier = None
+        if XGBClassifier is not None:
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=3,
+                learning_rate=0.05,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                eval_metric="logloss",
+                random_state=42,
+            )
+        else:
+            model_name = "Random Forest"
+            model = RandomForestClassifier(
+                n_estimators=120,
+                max_depth=7,
+                min_samples_leaf=8,
+                class_weight="balanced_subsample",
+                random_state=42,
+                n_jobs=-1,
+            )
+    elif model_choice == "Logistic Regression":
+        model = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1200, class_weight="balanced", random_state=42),
+        )
+    else:
+        model_name = "Random Forest"
+        model = RandomForestClassifier(
+            n_estimators=120,
+            max_depth=7,
+            min_samples_leaf=8,
+            class_weight="balanced_subsample",
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+    accuracy = float(accuracy_score(y_test, pred)) if accuracy_score else None
+    f1 = float(f1_score(y_test, pred, zero_division=0)) if f1_score else None
+
+    probs = pd.Series(index=labelled.index, dtype=float)
+    probs.loc[test.index] = model.predict_proba(X_test)[:, 1]
+
+    # Walk-forward backtest uses model probabilities on the test window; earlier rows use a neutral value.
+    probs = probs.reindex(df.index).ffill().fillna(0.5)
+
+    if hasattr(model, "feature_importances_"):
+        importance = pd.Series(model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False)
+    elif model_choice == "XGBoost" and hasattr(model, "feature_importances_"):
+        importance = pd.Series(model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False)
+    elif hasattr(model, "named_steps"):
+        coef = model.named_steps["logisticregression"].coef_[0]
+        importance = pd.Series(np.abs(coef), index=FEATURE_COLUMNS).sort_values(ascending=False)
+    else:
+        importance = heuristic_importance(df)
+
+    return ModelResult(
+        probability=probs,
+        latest_probability=float(probs.iloc[-1]),
+        accuracy=accuracy,
+        f1=f1,
+        feature_importance=importance,
+        model_name=model_name,
+    )
+
+
+def heuristic_probability(df: pd.DataFrame) -> pd.Series:
+    score = (
+        7.5 * df["return_3"].fillna(0)
+        + 4.5 * df["ma_gap"].fillna(0)
+        + 0.08 * (50 - df["rsi"].fillna(50)) / 50
+        - 1.8 * df["volatility"].fillna(0)
+        + 0.025 * (df["volume_spike"].fillna(1) - 1)
+    )
+    return (1 / (1 + np.exp(-score * 8))).clip(0.05, 0.95)
+
+
+def heuristic_importance(df: pd.DataFrame) -> pd.Series:
+    vals = {
+        "return_3": abs(df["return_3"].corr(df["close"].pct_change().shift(-3))) if len(df) > 10 else 0.2,
+        "ma_gap": 0.18,
+        "rsi": 0.16,
+        "macd_hist": 0.14,
+        "volatility": 0.12,
+        "volume_spike": 0.10,
+        "vwap_gap": 0.08,
+    }
+    return pd.Series(vals).replace([np.inf, -np.inf], np.nan).fillna(0.1).sort_values(ascending=False)
+
+
+def fetch_news_sentiment(ticker: str) -> Tuple[float, List[str]]:
+    positive = {
+        "beat",
+        "growth",
+        "upgrade",
+        "record",
+        "surge",
+        "strong",
+        "profit",
+        "optimistic",
+        "bullish",
+        "rally",
+        "outperform",
+    }
+    negative = {
+        "miss",
+        "downgrade",
+        "risk",
+        "weak",
+        "loss",
+        "lawsuit",
+        "bearish",
+        "fall",
+        "drop",
+        "concern",
+        "underperform",
+    }
+    if yf is None:
+        return 0.0, ["News API unavailable; using neutral sentiment."]
+    try:
+        news = yf.Ticker(ticker).news or []
+    except Exception:
+        return 0.0, ["News request failed; using neutral sentiment."]
+
+    headlines = []
+    score = 0
+    for item in news[:10]:
+        title = item.get("title") or item.get("content", {}).get("title", "")
+        if not title:
+            continue
+        headlines.append(title)
+        words = set(re.findall(r"[a-z]+", title.lower()))
+        score += len(words & positive) - len(words & negative)
+    if not headlines:
+        return 0.0, ["No recent headlines found; using neutral sentiment."]
+    return float(np.tanh(score / max(3, len(headlines)))), headlines[:5]
+
+
+def build_multifactor_score(df: pd.DataFrame) -> pd.Series:
+    momentum_score = (
+        0.45 * rolling_zscore(df["return_3"])
+        + 0.35 * rolling_zscore(df["return_6"])
+        + 0.20 * rolling_zscore(df["ma_gap"])
+    )
+    mean_reversion_score = (
+        -0.45 * rolling_zscore(df["rsi"])
+        - 0.30 * rolling_zscore(df["bb_percent"])
+        - 0.25 * rolling_zscore(df["z_score"])
+    )
+    flow_score = (
+        0.50 * rolling_zscore(df["volume_spike"])
+        + 0.30 * rolling_zscore(df["vwap_gap"])
+        + 0.20 * rolling_zscore(df["macd_hist"])
+    )
+    volatility_penalty = 0.35 * rolling_zscore(df["volatility"])
+
+    score = 0.40 * momentum_score + 0.35 * mean_reversion_score + 0.25 * flow_score - volatility_penalty
+    return score.clip(-3, 3)
+
+
+def build_multifactor_components(
+    df: pd.DataFrame,
+    momentum_weight: float,
+    mean_reversion_weight: float,
+    flow_weight: float,
+    volatility_weight: float,
+) -> pd.DataFrame:
+    components = pd.DataFrame(index=df.index)
+    components["momentum"] = (
+        0.45 * rolling_zscore(df["return_3"])
+        + 0.35 * rolling_zscore(df["return_6"])
+        + 0.20 * rolling_zscore(df["ma_gap"])
+    )
+    components["mean_reversion"] = (
+        -0.45 * rolling_zscore(df["rsi"])
+        - 0.30 * rolling_zscore(df["bb_percent"])
+        - 0.25 * rolling_zscore(df["z_score"])
+    )
+    components["flow_trend"] = (
+        0.50 * rolling_zscore(df["volume_spike"])
+        + 0.30 * rolling_zscore(df["vwap_gap"])
+        + 0.20 * rolling_zscore(df["macd_hist"])
+    )
+    components["volatility_penalty"] = -rolling_zscore(df["volatility"])
+    components["score"] = (
+        momentum_weight * components["momentum"]
+        + mean_reversion_weight * components["mean_reversion"]
+        + flow_weight * components["flow_trend"]
+        + volatility_weight * components["volatility_penalty"]
+    ).clip(-3, 3)
+    return components
+
+
+def build_technical_components(df: pd.DataFrame) -> pd.DataFrame:
+    technical = pd.DataFrame(index=df.index)
+    technical["trend"] = (
+        0.40 * rolling_zscore(df["ma_gap"])
+        + 0.35 * rolling_zscore(df["vwap_gap"])
+        + 0.25 * rolling_zscore(df["macd_hist"])
+    )
+    technical["timing"] = (
+        -0.55 * rolling_zscore(df["rsi"])
+        - 0.25 * rolling_zscore(df["bb_percent"])
+        + 0.20 * rolling_zscore(df["return_1"])
+    )
+    technical["technical_score"] = (0.65 * technical["trend"] + 0.35 * technical["timing"]).clip(-3, 3)
+    return technical
+
+
+def build_team_components(
+    df: pd.DataFrame,
+    factor_components: pd.DataFrame,
+    technical_components: pd.DataFrame,
+    news_score: float,
+    technical_weight: float,
+    factor_weight: float,
+    news_weight: float,
+    risk_weight: float,
+) -> pd.DataFrame:
+    team = pd.DataFrame(index=df.index)
+    team["technical_analyst"] = technical_components["technical_score"]
+    team["factor_analyst"] = factor_components["score"]
+    team["news_analyst"] = pd.Series(news_score, index=df.index, dtype=float).clip(-1, 1)
+    team["risk_manager"] = (
+        -0.60 * rolling_zscore(df["volatility"])
+        - 0.25 * rolling_zscore((df["close"] / df["bb_middle"] - 1).abs().fillna(0))
+        + 0.20 * (df["close"] >= df["bb_middle"]).astype(float)
+    ).clip(-2, 2)
+    team["manager_score"] = (
+        technical_weight * team["technical_analyst"]
+        + factor_weight * team["factor_analyst"]
+        + news_weight * team["news_analyst"]
+        + risk_weight * team["risk_manager"]
+    ).clip(-3, 3)
+    return team
+
+
+def build_strategy_signals(
+    df: pd.DataFrame,
+    strategy: str,
+    ml_result: ModelResult,
+    news_score: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    momentum_weight: float = 0.40,
+    mean_reversion_weight: float = 0.35,
+    flow_weight: float = 0.25,
+    volatility_weight: float = 0.35,
+    technical_weight: float = 0.35,
+    factor_weight: float = 0.35,
+    news_weight: float = 0.15,
+    risk_weight: float = 0.15,
+) -> pd.Series:
+    signal = pd.Series("Hold", index=df.index, dtype=object)
+    if strategy == MINI_TRADINGAGENTS_STRATEGY:
+        factor_components = build_multifactor_components(
+            df,
+            momentum_weight,
+            mean_reversion_weight,
+            flow_weight,
+            volatility_weight,
+        )
+        technical_components = build_technical_components(df)
+        team = build_team_components(
+            df,
+            factor_components,
+            technical_components,
+            news_score,
+            technical_weight,
+            factor_weight,
+            news_weight,
+            risk_weight,
+        )
+        trend_filter = df["close"] >= df["bb_middle"]
+        buy = (team["manager_score"] >= buy_threshold) & trend_filter & (team["risk_manager"] > -0.75) & (df["volume"] > 0)
+        sell = (team["manager_score"] <= sell_threshold) | (team["risk_manager"] < -0.90) | (df["close"] < df["bb_middle"])
+    elif strategy == MULTIFACTOR_STRATEGY:
+        score = build_multifactor_components(
+            df,
+            momentum_weight,
+            mean_reversion_weight,
+            flow_weight,
+            volatility_weight,
+        )["score"]
+        trend_filter = df["close"] >= df["bb_middle"]
+        buy = (score >= buy_threshold) & trend_filter & (df["volume"] > 0)
+        sell = (score <= sell_threshold) | (df["close"] < df["bb_middle"])
+    else:
+        buy = (
+            crossed_above(df["rsi"], FREQTRADE_BUY_RSI)
+            & (df["tema"] <= df["bb_middle"])
+            & (df["tema"] > df["tema"].shift(1))
+            & (df["volume"] > 0)
+        )
+        sell = (
+            crossed_above(df["rsi"], FREQTRADE_SELL_RSI)
+            & (df["tema"] > df["bb_middle"])
+            & (df["tema"] < df["tema"].shift(1))
+            & (df["volume"] > 0)
+        )
+
+    signal.loc[buy] = "Buy"
+    signal.loc[sell] = "Sell"
+    return signal
+
+
+def backtest(
+    df: pd.DataFrame,
+    signal: pd.Series,
+    initial_capital: float,
+    position_size: float,
+    stop_loss: float,
+    take_profit: float,
+    transaction_cost_bps: float,
+    max_hold_bars: int,
+    allow_short: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    cash = initial_capital
+    equity = initial_capital
+    position = None
+    trades: List[Dict[str, object]] = []
+    curve = []
+    cost_rate = transaction_cost_bps / 10000
+
+    rows = list(df.iterrows())
+    for i, (ts, row) in enumerate(rows):
+        price = float(row["close"])
+        current_signal = signal.loc[ts]
+
+        if position is not None:
+            side = position["side"]
+            raw_return = (price / position["entry_price"] - 1) * side
+            hold_bars = i - position["entry_i"]
+            exit_reason = None
+            if raw_return <= -stop_loss:
+                exit_reason = "stop-loss"
+            elif raw_return >= take_profit:
+                exit_reason = "take-profit"
+            elif hold_bars >= max_hold_bars:
+                exit_reason = "time exit"
+            elif (side == 1 and current_signal == "Sell") or (side == -1 and current_signal == "Buy"):
+                exit_reason = "opposite signal"
+
+            mark_to_market = cash + position["notional"] * raw_return
+            equity = mark_to_market
+
+            if exit_reason:
+                net_return = raw_return - 2 * cost_rate
+                pnl = position["notional"] * net_return
+                cash += pnl
+                equity = cash
+                trades.append(
+                    {
+                        "entry_time": position["entry_time"],
+                        "exit_time": ts,
+                        "side": "LONG" if side == 1 else "SHORT",
+                        "entry_price": position["entry_price"],
+                        "exit_price": price,
+                        "return_pct": net_return * 100,
+                        "profit_loss": pnl,
+                        "exit_reason": exit_reason,
+                    }
+                )
+                position = None
+
+        can_open = current_signal == "Buy" or (allow_short and current_signal == "Sell")
+        if position is None and can_open:
+            notional = max(cash * position_size, 0)
+            if notional > 0:
+                position = {
+                    "side": 1 if current_signal == "Buy" else -1,
+                    "entry_price": price,
+                    "entry_time": ts,
+                    "entry_i": i,
+                    "notional": notional,
+                }
+
+        curve.append({"time": ts, "equity": equity, "signal": current_signal, "close": price})
+
+    trades_df = pd.DataFrame(trades)
+    curve_df = pd.DataFrame(curve).set_index("time")
+    return trades_df, curve_df
+
+
+def performance_metrics(trades: pd.DataFrame, equity_curve: pd.DataFrame, initial_capital: float) -> Dict[str, float]:
+    if equity_curve.empty:
+        return {k: 0.0 for k in ["total_return", "sharpe", "max_drawdown", "win_rate", "avg_profit", "trades", "profit_factor"]}
+
+    total_return = equity_curve["equity"].iloc[-1] / initial_capital - 1
+    returns = equity_curve["equity"].pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    sharpe = 0.0
+    if len(returns) > 2 and returns.std() > 0:
+        sharpe = float((returns.mean() / returns.std()) * math.sqrt(min(252 * 78, len(returns) * 12)))
+
+    running_max = equity_curve["equity"].cummax()
+    drawdown = equity_curve["equity"] / running_max - 1
+    max_drawdown = float(drawdown.min())
+
+    if trades.empty:
+        win_rate = avg_profit = profit_factor = 0.0
+        n_trades = 0
+    else:
+        pnl = trades["profit_loss"]
+        win_rate = float((pnl > 0).mean())
+        avg_profit = float(pnl.mean())
+        gains = pnl[pnl > 0].sum()
+        losses = abs(pnl[pnl < 0].sum())
+        profit_factor = float(gains / losses) if losses > 0 else float("inf") if gains > 0 else 0.0
+        n_trades = int(len(trades))
+
+    return {
+        "total_return": float(total_return),
+        "sharpe": float(sharpe),
+        "max_drawdown": max_drawdown,
+        "win_rate": win_rate,
+        "avg_profit": avg_profit,
+        "trades": n_trades,
+        "profit_factor": profit_factor,
+    }
+
+
+def explain_signal(df: pd.DataFrame, signal: str, ml_result: ModelResult, strategy: str, news_score: float) -> str:
+    latest = df.iloc[-1]
+    multifactor_score = ml_result.latest_probability
+    if strategy == MINI_TRADINGAGENTS_STRATEGY:
+        return (
+            f"The mini TradingAgents team generated **{signal}** from a manager score of **{multifactor_score:.2f}**. "
+            f"Here, the Technical Analyst reviews trend and timing, the Factor Analyst reviews the multi-factor score, "
+            f"the News Analyst contributes sentiment, and the Risk Manager can weaken the final decision when volatility "
+            f"or downside risk rises. Latest RSI is {latest['rsi']:.1f}, MACD histogram is {latest['macd_hist']:.4f}, "
+            f"and short-term volatility is {latest['volatility']:.2%}."
+        )
+    if strategy == MULTIFACTOR_STRATEGY:
+        return (
+            f"The multi-factor model generated **{signal}** from a combined score of **{multifactor_score:.2f}**. "
+            f"The score blends momentum (`return_3`, `return_6`, `ma_gap`), mean reversion (`RSI`, `z_score`, "
+            f"`bb_percent`), and flow/trend confirmation (`volume_spike`, `vwap_gap`, `macd_hist`), with a penalty "
+            f"for high short-term volatility. Latest RSI is {latest['rsi']:.1f}, MA gap is {latest['ma_gap']:.2%}, "
+            f"and volatility is {latest['volatility']:.2%}."
+        )
+    return (
+        f"The Freqtrade sample strategy generated **{signal}** using RSI cross conditions with TEMA and the "
+        f"Bollinger middle band as trend guards. Latest RSI is {latest['rsi']:.1f}, TEMA is {latest['tema']:.2f}, "
+        f"and the Bollinger middle band is {latest['bb_middle']:.2f}."
+    )
+
+
+def format_pct(value: float) -> str:
+    return f"{value:.2%}"
+
+
+def main() -> None:
+    st.title(APP_TITLE)
+    st.caption("Educational simulator only. This is not financial advice and does not execute real trades.")
+
+    with st.sidebar:
+        st.header("User choices")
+        ticker = st.selectbox("Stock ticker", TICKERS, index=0)
+        months_label = st.radio("Time range", ["Recent 1 month", "Recent 3 months"], index=0)
+        months = 1 if months_label == "Recent 1 month" else 3
+        interval_label = st.radio("Candle interval", ["1-minute candles", "5-minute candles"], index=1)
+        interval = "1m" if interval_label.startswith("1") else "5m"
+        strategy = st.selectbox("Strategy type", STRATEGIES, index=0)
+        if strategy == MINI_TRADINGAGENTS_STRATEGY:
+            st.caption(
+                "Mini TradingAgents: Technical Analyst, Factor Analyst, News Analyst, and Risk Manager feed a final Manager decision."
+            )
+            st.header("Team tuning")
+            technical_weight = st.slider("Technical Analyst", 0.0, 1.0, 0.35, 0.05)
+            factor_weight = st.slider("Factor Analyst", 0.0, 1.0, 0.35, 0.05)
+            news_weight = st.slider("News Analyst", 0.0, 1.0, 0.15, 0.05)
+            risk_weight = st.slider("Risk Manager", 0.0, 1.0, 0.15, 0.05)
+            st.header("Factor tuning")
+            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, 0.40, 0.05)
+            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, 0.35, 0.05)
+            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, 0.25, 0.05)
+            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, 0.35, 0.05)
+            buy_threshold = st.slider("Manager buy threshold", 0.10, 1.20, TEAM_BUY_THRESHOLD, 0.05)
+            sell_threshold = st.slider("Manager sell threshold", -1.20, -0.10, TEAM_SELL_THRESHOLD, 0.05)
+        elif strategy == MULTIFACTOR_STRATEGY:
+            st.caption(
+                "Multi-factor model: blends momentum, mean reversion, volume-flow confirmation, and volatility filtering."
+            )
+            technical_weight = 0.35
+            factor_weight = 0.35
+            news_weight = 0.15
+            risk_weight = 0.15
+            st.header("Factor tuning")
+            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, 0.40, 0.05)
+            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, 0.35, 0.05)
+            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, 0.25, 0.05)
+            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, 0.35, 0.05)
+            buy_threshold = st.slider("Factor buy threshold", 0.10, 1.20, MULTIFACTOR_BUY_THRESHOLD, 0.05)
+            sell_threshold = st.slider("Factor sell threshold", -1.20, -0.10, MULTIFACTOR_SELL_THRESHOLD, 0.05)
+        else:
+            st.caption(
+                "Freqtrade sample strategy: RSI crosses with TEMA and Bollinger middle-band filters."
+            )
+            technical_weight = 0.35
+            factor_weight = 0.35
+            news_weight = 0.15
+            risk_weight = 0.15
+            momentum_weight = 0.40
+            mean_reversion_weight = 0.35
+            flow_weight = 0.25
+            volatility_weight = 0.35
+            buy_threshold = MULTIFACTOR_BUY_THRESHOLD
+            sell_threshold = MULTIFACTOR_SELL_THRESHOLD
+
+        st.header("Risk control")
+        initial_capital = st.number_input("Initial capital", min_value=1000.0, value=100000.0, step=5000.0)
+        position_size = st.slider("Position size per trade", 1, 100, 20) / 100
+        stop_loss = st.slider("Stop-loss", 0.1, 5.0, 1.0, 0.1) / 100
+        take_profit = st.slider("Take-profit", 0.1, 8.0, 2.0, 0.1) / 100
+        transaction_cost_bps = st.slider("Transaction cost (bps per side)", 0.0, 20.0, 2.0, 0.5)
+        max_hold_bars = st.slider("Max holding bars", 3, 80, 24)
+
+    start = time.time()
+    with st.spinner("Loading intraday data and calculating indicators..."):
+        raw, data_status = load_price_data(ticker, months, interval)
+        data = add_indicators(raw)
+        factor_components = build_multifactor_components(
+            data,
+            momentum_weight,
+            mean_reversion_weight,
+            flow_weight,
+            volatility_weight,
+        )
+        technical_components = build_technical_components(data)
+        news_score, headlines = fetch_news_sentiment(ticker)
+        team_components = build_team_components(
+            data,
+            factor_components,
+            technical_components,
+            news_score,
+            technical_weight,
+            factor_weight,
+            news_weight,
+            risk_weight,
+        )
+        ml_result = ModelResult(
+            probability=(
+                team_components["manager_score"]
+                if strategy == MINI_TRADINGAGENTS_STRATEGY
+                else factor_components["score"]
+                if strategy == MULTIFACTOR_STRATEGY
+                else pd.Series(0.5, index=data.index, dtype=float)
+            ),
+            latest_probability=(
+                float(team_components["manager_score"].iloc[-1])
+                if strategy == MINI_TRADINGAGENTS_STRATEGY
+                else float(factor_components["score"].iloc[-1])
+                if strategy == MULTIFACTOR_STRATEGY
+                else 0.5
+            ),
+            accuracy=None,
+            f1=None,
+            feature_importance=pd.Series(dtype=float),
+            model_name=strategy,
+            fallback=False,
+        )
+        signals = build_strategy_signals(
+            data,
+            strategy,
+            ml_result,
+            news_score,
+            buy_threshold,
+            sell_threshold,
+            momentum_weight,
+            mean_reversion_weight,
+            flow_weight,
+            volatility_weight,
+            technical_weight,
+            factor_weight,
+            news_weight,
+            risk_weight,
+        )
+        trades, equity_curve = backtest(
+            data,
+            signals,
+            initial_capital,
+            position_size,
+            stop_loss,
+            take_profit,
+            transaction_cost_bps,
+            max_hold_bars,
+            allow_short=False,
+        )
+        metrics = performance_metrics(trades, equity_curve, initial_capital)
+    elapsed = time.time() - start
+
+    status_cols = st.columns(4)
+    status_cols[0].metric("Ticker", ticker)
+    status_cols[1].metric("Bars loaded", f"{len(data):,}")
+    status_cols[2].metric("Strategy", strategy)
+    status_cols[3].metric("Latest signal", signals.iloc[-1])
+
+    if data_status.startswith("demo"):
+        st.warning(f"{data_status}. The app remains runnable for demonstration, but final report metrics should use live data.")
+    else:
+        st.success(f"{data_status}. Computed in {elapsed:.1f}s.")
+    st.markdown("### AI explanation")
+    st.write(explain_signal(data, signals.iloc[-1], ml_result, strategy, news_score))
+
+    perf_cols = st.columns(7)
+    perf_cols[0].metric("Total return", format_pct(metrics["total_return"]))
+    perf_cols[1].metric("Sharpe ratio", f"{metrics['sharpe']:.2f}")
+    perf_cols[2].metric("Max drawdown", format_pct(metrics["max_drawdown"]))
+    perf_cols[3].metric("Win rate", format_pct(metrics["win_rate"]))
+    perf_cols[4].metric("Avg P/L per trade", f"${metrics['avg_profit']:,.2f}")
+    perf_cols[5].metric("Number of trades", f"{metrics['trades']:,}")
+    pf = metrics["profit_factor"]
+    perf_cols[6].metric("Profit factor", "inf" if math.isinf(pf) else f"{pf:.2f}")
+
+    tab_chart, tab_trades, tab_model, tab_breakdown, tab_data, tab_news = st.tabs(
+        ["Price & Signals", "Trade Log", "Strategy Rules", "Factor Breakdown", "Data & Indicators", "News Sentiment"]
+    )
+
+    with tab_chart:
+        if go is None:
+            st.error("Plotly is not installed. Run `pip install -r requirements.txt`.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(
+                go.Candlestick(
+                    x=data.index,
+                    open=data["open"],
+                    high=data["high"],
+                    low=data["low"],
+                    close=data["close"],
+                    name="OHLC",
+                )
+            )
+            fig.add_trace(go.Scatter(x=data.index, y=data["vwap"], name="VWAP", line=dict(color="#f59e0b")))
+            fig.add_trace(go.Scatter(x=data.index, y=data["bb_upper"], name="BB upper", line=dict(color="#94a3b8", width=1)))
+            fig.add_trace(go.Scatter(x=data.index, y=data["bb_lower"], name="BB lower", line=dict(color="#94a3b8", width=1)))
+            buy_points = data[signals == "Buy"]
+            sell_points = data[signals == "Sell"]
+            fig.add_trace(
+                go.Scatter(
+                    x=buy_points.index,
+                    y=buy_points["close"],
+                    mode="markers",
+                    name="Buy",
+                    marker=dict(color="#16a34a", size=8, symbol="triangle-up"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=sell_points.index,
+                    y=sell_points["close"],
+                    mode="markers",
+                    name="Sell",
+                    marker=dict(color="#dc2626", size=8, symbol="triangle-down"),
+                )
+            )
+            fig.update_layout(height=620, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+            eq_fig = px.line(equity_curve, y="equity", title="Equity curve") if px else None
+            if eq_fig:
+                eq_fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(eq_fig, use_container_width=True)
+
+    with tab_trades:
+        if trades.empty:
+            st.info("No completed trades for the selected settings. Try lowering thresholds or changing strategy.")
+        else:
+            st.dataframe(
+                trades.sort_values("exit_time", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "Download trade log CSV",
+                trades.to_csv(index=False).encode("utf-8"),
+                file_name=f"{ticker}_{strategy.replace(' ', '_')}_trades.csv",
+                mime="text/csv",
+            )
+
+    with tab_model:
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Model", ml_result.model_name)
+        if strategy == MINI_TRADINGAGENTS_STRATEGY:
+            latest_score = team_components["manager_score"].iloc[-1]
+            col_b.metric("Buy threshold", f"{buy_threshold:.2f}")
+            col_c.metric("Manager score", f"{latest_score:.2f}")
+            st.markdown(
+                """
+                - `Technical Analyst`: studies trend, MACD, VWAP relation, and timing quality.
+                - `Factor Analyst`: reviews the multi-factor score from momentum, mean reversion, and flow factors.
+                - `News Analyst`: adds a sentiment push from recent headlines.
+                - `Risk Manager`: weakens the trade when volatility or downside risk increases.
+                - `Manager`: combines the team opinions into the final `Buy / Hold / Sell` signal.
+                """
+            )
+            st.caption(
+                f"Current team weights: technical {technical_weight:.2f}, factor {factor_weight:.2f}, "
+                f"news {news_weight:.2f}, risk {risk_weight:.2f}."
+            )
+        elif strategy == MULTIFACTOR_STRATEGY:
+            latest_score = factor_components["score"].iloc[-1]
+            col_b.metric("Buy threshold", f"{buy_threshold:.2f}")
+            col_c.metric("Latest factor score", f"{latest_score:.2f}")
+            st.markdown(
+                """
+                - `Buy`: combined factor score is strong, price is at or above the Bollinger middle band, and volume is valid.
+                - `Sell`: combined factor score weakens materially or price loses the Bollinger middle band.
+                - Factors used: momentum (`return_3`, `return_6`, `ma_gap`), mean reversion (`RSI`, `bb_percent`, `z_score`), flow/trend (`volume_spike`, `vwap_gap`, `macd_hist`), and a volatility penalty.
+                - Backtest mode here is long-only: a sell signal closes longs and does not open a new short.
+                """
+            )
+            st.caption(
+                f"Current tuning: momentum {momentum_weight:.2f}, mean reversion {mean_reversion_weight:.2f}, "
+                f"flow/trend {flow_weight:.2f}, volatility penalty {volatility_weight:.2f}, "
+                f"sell threshold {sell_threshold:.2f}."
+            )
+        else:
+            col_b.metric("Buy RSI cross", f">{FREQTRADE_BUY_RSI}")
+            col_c.metric("Sell RSI cross", f">{FREQTRADE_SELL_RSI}")
+            st.markdown(
+                """
+                - `Buy`: RSI crosses above 30, `TEMA <= Bollinger middle`, `TEMA` is rising, and volume is positive.
+                - `Sell`: RSI crosses above 70, `TEMA > Bollinger middle`, `TEMA` is falling, and volume is positive.
+                - Backtest mode here is long-only: a sell signal closes longs and does not open a new short.
+                """
+            )
+
+    with tab_breakdown:
+        if strategy == MINI_TRADINGAGENTS_STRATEGY:
+            latest_team = team_components[
+                ["technical_analyst", "factor_analyst", "news_analyst", "risk_manager"]
+            ].iloc[-1]
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("Technical", f"{latest_team['technical_analyst']:.2f}")
+            metric_cols[1].metric("Factor", f"{latest_team['factor_analyst']:.2f}")
+            metric_cols[2].metric("News", f"{latest_team['news_analyst']:.2f}")
+            metric_cols[3].metric("Risk", f"{latest_team['risk_manager']:.2f}")
+            if go is not None:
+                contrib = (
+                    latest_team
+                    * pd.Series(
+                        {
+                            "technical_analyst": technical_weight,
+                            "factor_analyst": factor_weight,
+                            "news_analyst": news_weight,
+                            "risk_manager": risk_weight,
+                        }
+                    )
+                ).sort_values()
+                fig_team = go.Figure(
+                    go.Bar(
+                        x=contrib.values,
+                        y=contrib.index,
+                        orientation="h",
+                        marker_color=["#b91c1c" if v < 0 else "#15803d" for v in contrib.values],
+                    )
+                )
+                fig_team.update_layout(title="Latest team contribution", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig_team, use_container_width=True)
+
+                team_ts = go.Figure()
+                team_ts.add_trace(go.Scatter(x=team_components.index, y=team_components["manager_score"], name="Manager score"))
+                team_ts.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
+                team_ts.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
+                team_ts.update_layout(title="Manager score over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(team_ts, use_container_width=True)
+        elif strategy == MULTIFACTOR_STRATEGY:
+            latest_breakdown = factor_components[["momentum", "mean_reversion", "flow_trend", "volatility_penalty"]].iloc[-1]
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("Momentum", f"{latest_breakdown['momentum']:.2f}")
+            metric_cols[1].metric("Mean reversion", f"{latest_breakdown['mean_reversion']:.2f}")
+            metric_cols[2].metric("Flow/trend", f"{latest_breakdown['flow_trend']:.2f}")
+            metric_cols[3].metric("Volatility", f"{latest_breakdown['volatility_penalty']:.2f}")
+            if go is not None:
+                contrib = (latest_breakdown * pd.Series(
+                    {
+                        "momentum": momentum_weight,
+                        "mean_reversion": mean_reversion_weight,
+                        "flow_trend": flow_weight,
+                        "volatility_penalty": volatility_weight,
+                    }
+                )).sort_values()
+                fig_breakdown = go.Figure(
+                    go.Bar(
+                        x=contrib.values,
+                        y=contrib.index,
+                        orientation="h",
+                        marker_color=["#b91c1c" if v < 0 else "#15803d" for v in contrib.values],
+                    )
+                )
+                fig_breakdown.update_layout(title="Latest factor contribution", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig_breakdown, use_container_width=True)
+
+                ts_fig = go.Figure()
+                ts_fig.add_trace(go.Scatter(x=factor_components.index, y=factor_components["score"], name="Factor score"))
+                ts_fig.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
+                ts_fig.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
+                ts_fig.update_layout(title="Factor score over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(ts_fig, use_container_width=True)
+        else:
+            st.info("Factor breakdown is available for the multi-factor model. Switch strategy to view it.")
+
+    with tab_data:
+        st.markdown("#### Latest calculated indicators")
+        latest_cols = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "rsi",
+            "tema",
+            "bb_middle",
+            "macd",
+            "macd_hist",
+            "bb_upper",
+            "bb_lower",
+            "volatility",
+            "volume_spike",
+            "ma_gap",
+            "z_score",
+            "bb_percent",
+        ]
+        st.dataframe(data[latest_cols].tail(200), use_container_width=True)
+
+    with tab_news:
+        st.metric("Headline sentiment score", f"{news_score:.2f}")
+        for headline in headlines:
+            st.write(f"- {headline}")
+
+
+if __name__ == "__main__":
+    main()
