@@ -1162,8 +1162,23 @@ def inject_visual_theme() -> None:
             border-color: var(--teal);
         }
 
-        [data-testid="stSlider"] [data-baseweb="slider"] > div > div {
-            background: var(--teal);
+        [data-testid="stSlider"] [data-baseweb="slider"] > div:first-child > div:first-child {
+            background: var(--teal) !important;
+        }
+
+        [data-testid="stSlider"] [data-testid="stThumbValue"] {
+            color: var(--teal) !important;
+            background: transparent !important;
+            font-size: 0.84rem !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stSlider"] [data-testid="stTickBarMin"],
+        [data-testid="stSlider"] [data-testid="stTickBarMax"] {
+            color: var(--muted) !important;
+            background: transparent !important;
+            font-size: 0.72rem !important;
+            font-weight: 600 !important;
         }
 
         [data-testid="stDownloadButton"] button,
