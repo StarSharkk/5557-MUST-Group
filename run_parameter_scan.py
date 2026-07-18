@@ -182,6 +182,115 @@ def make_ml_cache(data: pd.DataFrame) -> Dict[str, app.ModelResult]:
     }
 
 
+def legacy_fixed_split_probability(data: pd.DataFrame, horizon_bars: int = HORIZON_BARS) -> Tuple[pd.Series, float, int]:
+    """Reproduce the pre-fix RF probability coverage for a paired comparison.
+
+    This is diagnostic only: it keeps the old full-sample label threshold and 70/30
+    split, while the paired backtest below uses the corrected one-bar execution rule
+    for both methods so the comparison isolates the training-window change.
+    """
+    labelled = data.copy()
+    labelled["future_return"] = labelled["close"].shift(-horizon_bars) / labelled["close"] - 1
+    threshold = max(float(labelled["return_1"].std()) * math.sqrt(horizon_bars) * 0.25, 0.0005)
+    labelled["target"] = np.where(labelled["future_return"] > threshold, 1, 0)
+    labelled = labelled.dropna()
+    probabilities = pd.Series(np.nan, index=data.index, dtype=float)
+    if len(labelled) < 160:
+        return probabilities, 0.0, 0
+    split = int(len(labelled) * 0.70)
+    train = labelled.iloc[:split]
+    test = labelled.iloc[split:]
+    if train["target"].nunique() < 2:
+        return probabilities, 0.0, len(test)
+    model = app.RandomForestClassifier(
+        n_estimators=120,
+        max_depth=7,
+        min_samples_leaf=8,
+        class_weight="balanced_subsample",
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(train[app.FEATURE_COLUMNS], train["target"].astype(int))
+    probabilities.loc[test.index] = model.predict_proba(test[app.FEATURE_COLUMNS])[:, 1]
+    # This ffill/fillna is the exact old behavior and explains the wasted window.
+    probabilities = probabilities.reindex(data.index).ffill().fillna(0.5)
+    return probabilities, float(len(test) / len(data)), len(test)
+
+
+def compare_ml_window(
+    ticker: str,
+    data: pd.DataFrame,
+    evaluation_index: pd.DatetimeIndex,
+    walk_forward_result: app.ModelResult,
+) -> Dict[str, Any]:
+    old_probability, old_coverage, old_prediction_bars = legacy_fixed_split_probability(data)
+    old_result = app.ModelResult(
+        probability=old_probability,
+        latest_probability=float(old_probability.iloc[-1]),
+        accuracy=None,
+        f1=None,
+        feature_importance=pd.Series(dtype=float),
+        model_name="Legacy fixed 70/30 RF",
+    )
+    params = {
+        "buy_threshold": app.ML_BUY_PROB_THRESHOLD,
+        "sell_threshold": app.ML_SELL_PROB_THRESHOLD,
+        "stop_loss_mult": 1.5,
+        "take_profit_mult": 3.0,
+    }
+    stop_loss, take_profit = risk_series(data, params)
+    rows: Dict[str, Any] = {"ticker": ticker, "evaluation_bars": int(len(evaluation_index))}
+    for label, model_result, coverage, prediction_bars in (
+        ("legacy", old_result, old_coverage, old_prediction_bars),
+        ("walk_forward", walk_forward_result, float(walk_forward_result.probability.notna().mean()), int(walk_forward_result.probability.notna().sum())),
+    ):
+        signals = app.build_strategy_signals(
+            data,
+            app.ML_CLASSIFIER_STRATEGY,
+            model_result,
+            0.0,
+            params["buy_threshold"],
+            params["sell_threshold"],
+        )
+        eval_data = data.loc[evaluation_index]
+        trades, curve = app.backtest(
+            eval_data,
+            signals.loc[evaluation_index],
+            INITIAL_CAPITAL,
+            POSITION_SIZE,
+            stop_loss.loc[evaluation_index],
+            take_profit.loc[evaluation_index],
+            TRANSACTION_COST_BPS,
+            MAX_HOLD_BARS,
+            allow_short=False,
+        )
+        metrics = metric_row(trades, curve)
+        prefix = f"{label}_"
+        rows.update(
+            {
+                f"{prefix}coverage_full_data": coverage,
+                f"{prefix}prediction_bars_full_data": prediction_bars,
+                f"{prefix}trades": metrics["trades"],
+                f"{prefix}total_return": metrics["total_return"],
+                f"{prefix}sharpe": metrics["sharpe"],
+                f"{prefix}profit_factor": metrics["profit_factor"],
+                f"{prefix}max_drawdown": metrics["max_drawdown"],
+            }
+        )
+    rows.update(
+        {
+            "walk_forward_minus_legacy_sharpe": rows["walk_forward_sharpe"] - rows["legacy_sharpe"],
+            "walk_forward_minus_legacy_total_return": rows["walk_forward_total_return"] - rows["legacy_total_return"],
+            "walk_forward_minus_legacy_profit_factor": (
+                rows["walk_forward_profit_factor"] - rows["legacy_profit_factor"]
+                if np.isfinite(rows["walk_forward_profit_factor"]) and np.isfinite(rows["legacy_profit_factor"])
+                else np.nan
+            ),
+        }
+    )
+    return rows
+
+
 def make_model_result(data: pd.DataFrame, strategy: str, params: Dict[str, Any], ml_cache: Dict[str, app.ModelResult], news_score: float) -> app.ModelResult:
     if strategy == app.ML_CLASSIFIER_STRATEGY:
         return ml_cache[str(params["model"])]
@@ -402,10 +511,46 @@ def build_matrix(full_long: pd.DataFrame, window_id: str = "evaluation_full") ->
     return pd.DataFrame(matrix_rows)
 
 
+def build_aggregate_window_summary(window_matrix: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate all four windows without selecting a winner from one slice."""
+    if window_matrix.empty:
+        return pd.DataFrame()
+    rows: List[Dict[str, Any]] = []
+    group_columns = ["strategy", "family", "config_id", "params_json"]
+    for keys, group in window_matrix.groupby(group_columns, dropna=False):
+        row = dict(zip(group_columns, keys))
+        sharpe_delta_columns = [c for c in group.columns if c.endswith("_sharpe_delta")]
+        sharpe_improved_columns = [c for c in group.columns if c.endswith("_sharpe_improved")]
+        pf_improved_columns = [c for c in group.columns if c.endswith("_pf_improved")]
+        both_cells = 0
+        for ticker in TICKERS:
+            prefix = ticker.replace(".", "_")
+            sharpe_col = f"{prefix}_sharpe_improved"
+            pf_col = f"{prefix}_pf_improved"
+            if sharpe_col in group and pf_col in group:
+                both_cells += int((group[sharpe_col].astype(bool) & group[pf_col].astype(bool)).sum())
+        row.update(
+            {
+                "windows": int(group["window_id"].nunique()),
+                "mean_sharpe": float(group["mean_sharpe"].mean()),
+                "mean_pooled_profit_factor": float(group["pooled_profit_factor"].replace([np.inf, -np.inf], np.nan).mean()),
+                "mean_sharpe_delta_all_cells": float(group[sharpe_delta_columns].to_numpy(dtype=float).mean()) if sharpe_delta_columns else np.nan,
+                "sharpe_improved_cells": int(group[sharpe_improved_columns].astype(bool).sum().sum()) if sharpe_improved_columns else 0,
+                "pf_improved_cells": int(group[pf_improved_columns].astype(bool).sum().sum()) if pf_improved_columns else 0,
+                "both_improved_cells": both_cells,
+                "majority_windows": int(((group["both_improved_n"] >= 3) & (group["zero_trade_n"] == 0)).sum()),
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def write_summary(
     matrix: pd.DataFrame,
     window_matrix: pd.DataFrame,
+    aggregate_matrix: pd.DataFrame,
     long_df: pd.DataFrame,
+    ml_comparison: pd.DataFrame,
     output_dir: Path,
     manifest: Dict[str, Any],
 ) -> None:
@@ -440,6 +585,40 @@ def write_summary(
             )
     lines += [
         "",
+        "## Aggregate evidence across all windows",
+        "",
+    ]
+    if aggregate_matrix.empty:
+        lines.append("No aggregate window summary was produced.")
+    else:
+        stable_aggregate = aggregate_matrix[
+            (aggregate_matrix["majority_windows"] >= 3)
+            & (aggregate_matrix["mean_sharpe_delta_all_cells"] > 0)
+        ]
+        if stable_aggregate.empty:
+            lines.append("No configuration improved both metrics on at least 3 of 4 stocks in at least 3 of 4 windows while also having a positive mean Sharpe delta across all paired ticker-window cells. Therefore no parameter change is promoted as universally stable.")
+        else:
+            for _, row in stable_aggregate.sort_values("mean_sharpe_delta_all_cells", ascending=False).iterrows():
+                lines.append(f"- `{row['strategy']}` / `{row['config_id']}`: majority windows `{int(row['majority_windows'])}/4`, both-improved cells `{int(row['both_improved_cells'])}/16`, mean Sharpe delta `{row['mean_sharpe_delta_all_cells']:.3f}`.")
+    lines += [
+        "",
+        "## ML training-window before/after check",
+        "",
+    ]
+    if ml_comparison.empty:
+        lines.append("No paired ML comparison was produced.")
+    else:
+        mean_sharpe_delta = float(ml_comparison["walk_forward_minus_legacy_sharpe"].mean())
+        mean_return_delta = float(ml_comparison["walk_forward_minus_legacy_total_return"].mean())
+        lines.append(
+            f"On the same frozen OHLCV snapshots, fixed 70/30 RF coverage was `{ml_comparison['legacy_coverage_full_data'].mean():.1%}` versus walk-forward coverage `{ml_comparison['walk_forward_coverage_full_data'].mean():.1%}`. The paired full-window mean Sharpe delta was `{mean_sharpe_delta:.3f}` and mean total-return delta was `{mean_return_delta:.2%}`; per-ticker values are retained in `ml_window_comparison.csv`."
+        )
+        for _, row in ml_comparison.iterrows():
+            lines.append(
+                f"- `{row['ticker']}`: coverage `{row['legacy_coverage_full_data']:.1%}` -> `{row['walk_forward_coverage_full_data']:.1%}`, Sharpe `{row['legacy_sharpe']:.3f}` -> `{row['walk_forward_sharpe']:.3f}`, PF `{row['legacy_profit_factor']}` -> `{row['walk_forward_profit_factor']}`, trades `{int(row['legacy_trades'])}` -> `{int(row['walk_forward_trades'])}`."
+            )
+    lines += [
+        "",
         "## Window consistency",
         "",
     ]
@@ -455,7 +634,7 @@ def write_summary(
         "",
         "Configurations with fewer than 3 of 4 tickers improving both Sharpe and profit factor are retained in the matrix but are treated as idiosyncratic/inconclusive. A positive result on only one or two stocks, or one driven by very few trades, is not used as the selected methodology.",
         "",
-        "The complete parameter-by-stock matrix is in `parameter_stock_matrix.csv`; the long table, fold diagnostics, frozen OHLCV files, and all completed trades are retained alongside this summary.",
+        "The complete parameter-by-stock matrix is in `parameter_stock_matrix.csv`; aggregate evidence is in `parameter_aggregate_summary.csv`; the ML paired comparison is in `ml_window_comparison.csv`; the long table, fold diagnostics, frozen OHLCV files, and all completed trades are retained alongside this summary.",
     ]
     (output_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -510,6 +689,7 @@ def run(output_dir: Path) -> None:
     long_rows: List[Dict[str, Any]] = []
     trade_rows: List[Dict[str, Any]] = []
     fold_rows: List[Dict[str, Any]] = []
+    comparison_rows: List[Dict[str, Any]] = []
     for ticker, (data, evaluation_index, _) in data_by_ticker.items():
         split = len(evaluation_index) // 3
         windows = {
@@ -519,6 +699,7 @@ def run(output_dir: Path) -> None:
             "evaluation_late_third": evaluation_index[2 * split :],
         }
         ml_cache = make_ml_cache(data)
+        comparison_rows.append(compare_ml_window(ticker, data, evaluation_index, ml_cache["Random Forest"]))
         for model_name, model_result in ml_cache.items():
             if model_result.fold_metrics is not None and not model_result.fold_metrics.empty:
                 diagnostic = model_result.fold_metrics.copy()
@@ -539,12 +720,16 @@ def run(output_dir: Path) -> None:
         window_matrix.insert(0, "window_id", window_id)
         window_matrices.append(window_matrix)
     all_window_matrix = pd.concat(window_matrices, ignore_index=True) if window_matrices else pd.DataFrame()
+    ml_comparison = pd.DataFrame(comparison_rows)
     long_df.to_csv(output_dir / "scan_runs_long.csv", index=False)
     matrix.to_csv(output_dir / "parameter_stock_matrix.csv", index=False)
     all_window_matrix.to_csv(output_dir / "parameter_window_summary.csv", index=False)
     pd.DataFrame(fold_rows).to_csv(output_dir / "ml_fold_diagnostics.csv", index=False)
+    ml_comparison.to_csv(output_dir / "ml_window_comparison.csv", index=False)
     trades_df.to_csv(output_dir / "all_trades.csv", index=False)
-    write_summary(matrix, all_window_matrix, long_df, output_dir, manifest)
+    aggregate_matrix = build_aggregate_window_summary(all_window_matrix)
+    aggregate_matrix.to_csv(output_dir / "parameter_aggregate_summary.csv", index=False)
+    write_summary(matrix, all_window_matrix, aggregate_matrix, long_df, ml_comparison, output_dir, manifest)
     print(json.dumps({
         "output_dir": str(output_dir),
         "configs": len(configs),

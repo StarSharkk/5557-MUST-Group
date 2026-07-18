@@ -67,7 +67,7 @@ The scanner downloads one 60-day/5-minute snapshot per ticker, evaluates the lat
 30 calendar days, and fails if any ticker falls back to demo data. It writes the
 frozen OHLCV snapshots, `data_manifest.json`, `scan_runs_long.csv`,
 `parameter_stock_matrix.csv`, `parameter_window_summary.csv`,
-`ml_fold_diagnostics.csv`, `all_trades.csv`, and `summary.md`. Every completed trade,
+`ml_fold_diagnostics.csv`, `ml_window_comparison.csv`, `parameter_aggregate_summary.csv`, `all_trades.csv`, and `summary.md`. Every completed trade,
 including losses, remains in `all_trades.csv`. Historical Yahoo news snapshots are
 not available, so the scan uses an explicitly recorded neutral news score instead of
 leaking current headlines into past bars.
