@@ -8,10 +8,10 @@ An AI-powered finance application for intraday trading education. Users select a
 - Time ranges: recent 1 month or 3 months
 - Candles: 1-minute or 5-minute
 - Strategies:
-  - Momentum strategy
-  - Mean reversion strategy
-  - ML classifier
-  - News sentiment strategy
+  - Mini TradingAgents: a Technical Analyst, Factor Analyst, News Analyst, and Risk Manager feed a final Manager Buy/Hold/Sell decision
+  - Multi-factor model: blends momentum, mean reversion, and volume/trend-flow z-scores with a volatility penalty
+  - Freqtrade Sample Strategy: RSI cross conditions with TEMA and Bollinger middle-band trend guards
+  - ML Classifier: trains a Random Forest, Logistic Regression, or XGBoost model on recent indicator features and trades on its predicted probability, with held-out accuracy/F1 and a feature-importance chart shown in the app
 - Indicators:
   - VWAP
   - RSI
@@ -21,11 +21,12 @@ An AI-powered finance application for intraday trading education. Users select a
   - Volume spike
   - Moving average crossover
 - ML prediction:
-  - Probability of price increasing over the next 5 or 15 minutes
-  - Random Forest, Logistic Regression, and optional XGBoost
+  - Probability of price increasing over the next 5 or 15 minutes (ML Classifier strategy)
+  - Random Forest, Logistic Regression, and optional XGBoost, evaluated on a chronological 70/30 train/test split
+- News sentiment: keyword-based scoring of recent headlines, fed into the Mini TradingAgents News Analyst
 - Backtesting:
-  - Trade log with entry price, exit price, profit/loss, exit reason
-  - Stop-loss, take-profit, and position sizing
+  - Trade log with entry price, exit price, profit/loss, exit reason, and the stop-loss/take-profit used for that trade
+  - Volatility-adaptive stop-loss/take-profit (scaled to recent volatility and the chosen max holding period), or fixed-percentage mode, plus position sizing
 - Dashboard:
   - Total return
   - Sharpe ratio

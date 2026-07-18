@@ -41,13 +41,17 @@ TICKERS = ["AAPL", "TSLA", "NVDA", "CBA.AX"]
 MINI_TRADINGAGENTS_STRATEGY = "Mini TradingAgents"
 MULTIFACTOR_STRATEGY = "Multi-factor model"
 FREQTRADE_STRATEGY = "Freqtrade Sample Strategy"
-STRATEGIES = [MINI_TRADINGAGENTS_STRATEGY, MULTIFACTOR_STRATEGY, FREQTRADE_STRATEGY]
+ML_CLASSIFIER_STRATEGY = "ML Classifier"
+STRATEGIES = [MINI_TRADINGAGENTS_STRATEGY, MULTIFACTOR_STRATEGY, FREQTRADE_STRATEGY, ML_CLASSIFIER_STRATEGY]
+MODEL_CHOICES = ["Random Forest", "Logistic Regression", "XGBoost"]
 FREQTRADE_BUY_RSI = 30
 FREQTRADE_SELL_RSI = 70
 MULTIFACTOR_BUY_THRESHOLD = 0.35
 MULTIFACTOR_SELL_THRESHOLD = -0.35
 TEAM_BUY_THRESHOLD = 0.20
 TEAM_SELL_THRESHOLD = -0.15
+ML_BUY_PROB_THRESHOLD = 0.55
+ML_SELL_PROB_THRESHOLD = 0.45
 FEATURE_COLUMNS = [
     "return_1",
     "return_3",
@@ -543,6 +547,10 @@ def build_strategy_signals(
         trend_filter = df["close"] >= df["bb_middle"]
         buy = (score >= buy_threshold) & trend_filter & (df["volume"] > 0)
         sell = (score <= sell_threshold) | (df["close"] < df["bb_middle"])
+    elif strategy == ML_CLASSIFIER_STRATEGY:
+        probability = ml_result.probability.reindex(df.index)
+        buy = (probability >= buy_threshold) & (df["volume"] > 0)
+        sell = probability <= sell_threshold
     else:
         buy = (
             crossed_above(df["rsi"], FREQTRADE_BUY_RSI)
@@ -567,8 +575,8 @@ def backtest(
     signal: pd.Series,
     initial_capital: float,
     position_size: float,
-    stop_loss: float,
-    take_profit: float,
+    stop_loss: pd.Series,
+    take_profit: pd.Series,
     transaction_cost_bps: float,
     max_hold_bars: int,
     allow_short: bool = False,
@@ -590,9 +598,9 @@ def backtest(
             raw_return = (price / position["entry_price"] - 1) * side
             hold_bars = i - position["entry_i"]
             exit_reason = None
-            if raw_return <= -stop_loss:
+            if raw_return <= -position["stop_loss"]:
                 exit_reason = "stop-loss"
-            elif raw_return >= take_profit:
+            elif raw_return >= position["take_profit"]:
                 exit_reason = "take-profit"
             elif hold_bars >= max_hold_bars:
                 exit_reason = "time exit"
@@ -617,6 +625,8 @@ def backtest(
                         "return_pct": net_return * 100,
                         "profit_loss": pnl,
                         "exit_reason": exit_reason,
+                        "stop_loss_pct": position["stop_loss"] * 100,
+                        "take_profit_pct": position["take_profit"] * 100,
                     }
                 )
                 position = None
@@ -631,6 +641,8 @@ def backtest(
                     "entry_time": ts,
                     "entry_i": i,
                     "notional": notional,
+                    "stop_loss": float(stop_loss.loc[ts]),
+                    "take_profit": float(take_profit.loc[ts]),
                 }
 
         curve.append({"time": ts, "equity": equity, "signal": current_signal, "close": price})
@@ -696,6 +708,18 @@ def explain_signal(df: pd.DataFrame, signal: str, ml_result: ModelResult, strate
             f"for high short-term volatility. Latest RSI is {latest['rsi']:.1f}, MA gap is {latest['ma_gap']:.2%}, "
             f"and volatility is {latest['volatility']:.2%}."
         )
+    if strategy == ML_CLASSIFIER_STRATEGY:
+        accuracy_note = (
+            f"held-out accuracy {ml_result.accuracy:.1%} (F1 {ml_result.f1:.2f})"
+            if ml_result.accuracy is not None
+            else "not enough labelled bars yet, so it fell back to a heuristic score"
+        )
+        return (
+            f"The {ml_result.model_name} classifier generated **{signal}** from a predicted probability of "
+            f"**{multifactor_score:.2f}** that price rises over the chosen horizon ({accuracy_note}). "
+            f"Latest RSI is {latest['rsi']:.1f}, MACD histogram is {latest['macd_hist']:.4f}, "
+            f"and short-term volatility is {latest['volatility']:.2%}."
+        )
     return (
         f"The Freqtrade sample strategy generated **{signal}** using RSI cross conditions with TEMA and the "
         f"Bollinger middle band as trend guards. Latest RSI is {latest['rsi']:.1f}, TEMA is {latest['tema']:.2f}, "
@@ -750,6 +774,25 @@ def main() -> None:
             volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, 0.35, 0.05)
             buy_threshold = st.slider("Factor buy threshold", 0.10, 1.20, MULTIFACTOR_BUY_THRESHOLD, 0.05)
             sell_threshold = st.slider("Factor sell threshold", -1.20, -0.10, MULTIFACTOR_SELL_THRESHOLD, 0.05)
+        elif strategy == ML_CLASSIFIER_STRATEGY:
+            st.caption(
+                "ML Classifier: trains a Random Forest, Logistic Regression, or XGBoost model on recent "
+                "indicator features to predict the probability that price rises over the chosen horizon."
+            )
+            technical_weight = 0.35
+            factor_weight = 0.35
+            news_weight = 0.15
+            risk_weight = 0.15
+            momentum_weight = 0.40
+            mean_reversion_weight = 0.35
+            flow_weight = 0.25
+            volatility_weight = 0.35
+            st.header("Model settings")
+            model_choice = st.selectbox("Model", MODEL_CHOICES, index=0)
+            horizon_label = st.radio("Prediction horizon", ["5 minutes", "15 minutes"], index=0)
+            horizon_minutes = 5 if horizon_label.startswith("5") else 15
+            buy_threshold = st.slider("Buy probability threshold", 0.50, 0.90, ML_BUY_PROB_THRESHOLD, 0.01)
+            sell_threshold = st.slider("Sell probability threshold", 0.10, 0.50, ML_SELL_PROB_THRESHOLD, 0.01)
         else:
             st.caption(
                 "Freqtrade sample strategy: RSI crosses with TEMA and Bollinger middle-band filters."
@@ -768,8 +811,24 @@ def main() -> None:
         st.header("Risk control")
         initial_capital = st.number_input("Initial capital", min_value=1000.0, value=100000.0, step=5000.0)
         position_size = st.slider("Position size per trade", 1, 100, 20) / 100
-        stop_loss = st.slider("Stop-loss", 0.1, 5.0, 1.0, 0.1) / 100
-        take_profit = st.slider("Take-profit", 0.1, 8.0, 2.0, 0.1) / 100
+        adaptive_risk = st.checkbox(
+            "Volatility-adaptive stop-loss/take-profit",
+            value=True,
+            help=(
+                "Scales each trade's stop-loss/take-profit off the rolling short-term volatility at entry, "
+                "instead of a single fixed percentage. A fixed 1% stop is often wider than a typical 5-minute "
+                "AAPL move, so most exits end up being time-based rather than real risk control; scaling by "
+                "recent volatility keeps the stop meaningful across tickers and candle intervals."
+            ),
+        )
+        if adaptive_risk:
+            stop_loss_mult = st.slider("Stop-loss (x recent volatility)", 0.5, 5.0, 1.5, 0.1)
+            take_profit_mult = st.slider("Take-profit (x recent volatility)", 0.5, 8.0, 3.0, 0.1)
+            stop_loss = take_profit = None
+        else:
+            stop_loss = st.slider("Stop-loss", 0.1, 5.0, 0.5, 0.1) / 100
+            take_profit = st.slider("Take-profit", 0.1, 8.0, 1.0, 0.1) / 100
+            stop_loss_mult = take_profit_mult = None
         transaction_cost_bps = st.slider("Transaction cost (bps per side)", 0.0, 20.0, 2.0, 0.5)
         max_hold_bars = st.slider("Max holding bars", 3, 80, 24)
 
@@ -796,27 +855,40 @@ def main() -> None:
             news_weight,
             risk_weight,
         )
-        ml_result = ModelResult(
-            probability=(
-                team_components["manager_score"]
-                if strategy == MINI_TRADINGAGENTS_STRATEGY
-                else factor_components["score"]
-                if strategy == MULTIFACTOR_STRATEGY
-                else pd.Series(0.5, index=data.index, dtype=float)
-            ),
-            latest_probability=(
-                float(team_components["manager_score"].iloc[-1])
-                if strategy == MINI_TRADINGAGENTS_STRATEGY
-                else float(factor_components["score"].iloc[-1])
-                if strategy == MULTIFACTOR_STRATEGY
-                else 0.5
-            ),
-            accuracy=None,
-            f1=None,
-            feature_importance=pd.Series(dtype=float),
-            model_name=strategy,
-            fallback=False,
-        )
+        if strategy == MINI_TRADINGAGENTS_STRATEGY:
+            ml_result = ModelResult(
+                probability=team_components["manager_score"],
+                latest_probability=float(team_components["manager_score"].iloc[-1]),
+                accuracy=None,
+                f1=None,
+                feature_importance=pd.Series(dtype=float),
+                model_name=strategy,
+                fallback=False,
+            )
+        elif strategy == MULTIFACTOR_STRATEGY:
+            ml_result = ModelResult(
+                probability=factor_components["score"],
+                latest_probability=float(factor_components["score"].iloc[-1]),
+                accuracy=None,
+                f1=None,
+                feature_importance=pd.Series(dtype=float),
+                model_name=strategy,
+                fallback=False,
+            )
+        elif strategy == ML_CLASSIFIER_STRATEGY:
+            bar_minutes = 1 if interval == "1m" else 5
+            horizon_bars = max(1, round(horizon_minutes / bar_minutes))
+            ml_result = train_predict_model(data, model_choice, horizon_bars)
+        else:
+            ml_result = ModelResult(
+                probability=pd.Series(0.5, index=data.index, dtype=float),
+                latest_probability=0.5,
+                accuracy=None,
+                f1=None,
+                feature_importance=pd.Series(dtype=float),
+                model_name=strategy,
+                fallback=False,
+            )
         signals = build_strategy_signals(
             data,
             strategy,
@@ -833,13 +905,25 @@ def main() -> None:
             news_weight,
             risk_weight,
         )
+        if adaptive_risk:
+            vol_floor = data["volatility"].dropna().median() if data["volatility"].notna().any() else 0.001
+            vol = data["volatility"].fillna(vol_floor).clip(lower=vol_floor * 0.25)
+            # Scale single-bar volatility up to the expected holding horizon (random-walk sqrt-time rule) so the
+            # stop reflects the move a trade could plausibly make before its natural exit, not just the next bar.
+            horizon_scale = math.sqrt(min(max_hold_bars, 60))
+            stop_loss_series = (stop_loss_mult * vol * horizon_scale).clip(lower=0.0015, upper=0.05)
+            take_profit_series = (take_profit_mult * vol * horizon_scale).clip(lower=0.003, upper=0.10)
+        else:
+            stop_loss_series = pd.Series(stop_loss, index=data.index)
+            take_profit_series = pd.Series(take_profit, index=data.index)
+
         trades, equity_curve = backtest(
             data,
             signals,
             initial_capital,
             position_size,
-            stop_loss,
-            take_profit,
+            stop_loss_series,
+            take_profit_series,
             transaction_cost_bps,
             max_hold_bars,
             allow_short=False,
@@ -857,6 +941,12 @@ def main() -> None:
         st.warning(f"{data_status}. The app remains runnable for demonstration, but final report metrics should use live data.")
     else:
         st.success(f"{data_status}. Computed in {elapsed:.1f}s.")
+    if adaptive_risk:
+        st.caption(
+            f"Adaptive risk control this run: median stop-loss {stop_loss_series.median():.2%}, "
+            f"median take-profit {take_profit_series.median():.2%} (scaled from recent volatility, "
+            f"not the flat 1%/2% defaults)."
+        )
     st.markdown("### AI explanation")
     st.write(explain_signal(data, signals.iloc[-1], ml_result, strategy, news_score))
 
@@ -973,6 +1063,29 @@ def main() -> None:
                 f"flow/trend {flow_weight:.2f}, volatility penalty {volatility_weight:.2f}, "
                 f"sell threshold {sell_threshold:.2f}."
             )
+        elif strategy == ML_CLASSIFIER_STRATEGY:
+            col_b.metric("Held-out accuracy", f"{ml_result.accuracy:.1%}" if ml_result.accuracy is not None else "n/a")
+            col_c.metric("F1 score", f"{ml_result.f1:.2f}" if ml_result.f1 is not None else "n/a")
+            if ml_result.fallback:
+                st.warning(
+                    "Not enough labelled bars for this window to train/evaluate the model, so the app fell back "
+                    "to a heuristic score. Try a longer time range."
+                )
+            st.markdown(
+                f"""
+                - Trains on a 70/30 chronological split (no shuffling) so the held-out accuracy/F1 reflect a
+                  genuine out-of-sample test, not lookahead.
+                - `Buy`: predicted probability of a price rise is at or above the buy threshold and volume is valid.
+                - `Sell`: predicted probability drops to or below the sell threshold.
+                - Features: {', '.join(FEATURE_COLUMNS)}.
+                - Backtest mode here is long-only: a sell signal closes longs and does not open a new short.
+                """
+            )
+            if not ml_result.feature_importance.empty and go is not None:
+                importance = ml_result.feature_importance.sort_values()
+                fig_importance = go.Figure(go.Bar(x=importance.values, y=importance.index, orientation="h"))
+                fig_importance.update_layout(title="Feature importance", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(fig_importance, use_container_width=True)
         else:
             col_b.metric("Buy RSI cross", f">{FREQTRADE_BUY_RSI}")
             col_c.metric("Sell RSI cross", f">{FREQTRADE_SELL_RSI}")
@@ -1056,6 +1169,16 @@ def main() -> None:
                 ts_fig.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
                 ts_fig.update_layout(title="Factor score over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
                 st.plotly_chart(ts_fig, use_container_width=True)
+        elif strategy == ML_CLASSIFIER_STRATEGY:
+            if go is not None:
+                prob_fig = go.Figure()
+                prob_fig.add_trace(go.Scatter(x=ml_result.probability.index, y=ml_result.probability, name="P(price up)"))
+                prob_fig.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
+                prob_fig.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
+                prob_fig.update_layout(title="Predicted probability over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                st.plotly_chart(prob_fig, use_container_width=True)
+            if not ml_result.feature_importance.empty:
+                st.dataframe(ml_result.feature_importance.rename("importance"), use_container_width=True)
         else:
             st.info("Factor breakdown is available for the multi-factor model. Switch strategy to view it.")
 
