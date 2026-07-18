@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,13 +27,15 @@ except Exception:  # pragma: no cover - handled in UI
 try:
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix, f1_score
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 except Exception:  # pragma: no cover - handled in UI
     RandomForestClassifier = None
     LogisticRegression = None
     accuracy_score = None
+    balanced_accuracy_score = None
+    confusion_matrix = None
     f1_score = None
     make_pipeline = None
     StandardScaler = None
@@ -48,10 +52,20 @@ FREQTRADE_BUY_RSI = 30
 FREQTRADE_SELL_RSI = 70
 MULTIFACTOR_BUY_THRESHOLD = 0.35
 MULTIFACTOR_SELL_THRESHOLD = -0.35
+# Candidate selected before this default change by the frozen multi-stock,
+# four-window rule: both Sharpe and PF improved on >=3/4 tickers in 3/4 windows.
+# Keep the original weights in the scanner as the explicit comparison baseline.
+MULTIFACTOR_DEFAULT_MOMENTUM_WEIGHT = 0.55
+MULTIFACTOR_DEFAULT_MEAN_REVERSION_WEIGHT = 0.25
+MULTIFACTOR_DEFAULT_FLOW_WEIGHT = 0.20
+MULTIFACTOR_DEFAULT_VOLATILITY_WEIGHT = 0.20
 TEAM_BUY_THRESHOLD = 0.20
 TEAM_SELL_THRESHOLD = -0.15
 ML_BUY_PROB_THRESHOLD = 0.55
 ML_SELL_PROB_THRESHOLD = 0.45
+ML_MIN_TRAIN_BARS = 200
+ML_TRAIN_WINDOW_BARS = 1000
+ML_RETRAIN_INTERVAL = 200
 FEATURE_COLUMNS = [
     "return_1",
     "return_3",
@@ -75,6 +89,13 @@ class ModelResult:
     feature_importance: pd.Series
     model_name: str
     fallback: bool = False
+    prediction_coverage: float = 0.0
+    walk_forward_folds: int = 0
+    oos_label_positive_rate: float | None = None
+    oos_predicted_positive_rate: float | None = None
+    fold_metrics: pd.DataFrame | None = None
+    fallback_reason: str | None = None
+    prediction_start: int | None = None
 
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
@@ -171,6 +192,19 @@ def rolling_zscore(series: pd.Series, window: int = 80) -> pd.Series:
     return ((series - mean) / std).replace([np.inf, -np.inf], np.nan).fillna(0)
 
 
+def configure_yfinance_cache() -> None:
+    """Keep yfinance's timezone SQLite cache inside the project/runtime directory."""
+    if yf is None or not hasattr(yf, "set_tz_cache_location"):
+        return
+    cache_dir = Path(os.environ.get("YFINANCE_CACHE_DIR", ".yfinance-cache"))
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        yf.set_tz_cache_location(str(cache_dir))
+    except Exception:
+        # A read-only runtime can still use yfinance without the optional cache.
+        pass
+
+
 @st.cache_data(show_spinner=False, ttl=1800)
 def load_price_data(ticker: str, months: int, interval: str) -> Tuple[pd.DataFrame, str]:
     ticker = clean_ticker(ticker)
@@ -180,6 +214,7 @@ def load_price_data(ticker: str, months: int, interval: str) -> Tuple[pd.DataFra
         return make_demo_data(ticker, months, interval), "demo: yfinance is not installed"
 
     try:
+        configure_yfinance_cache()
         data = yf.download(
             ticker,
             period=period,
@@ -284,49 +319,42 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out.replace([np.inf, -np.inf], np.nan).dropna()
 
 
-def make_labels(df: pd.DataFrame, horizon_bars: int) -> pd.DataFrame:
+def calculate_label_threshold(df: pd.DataFrame, horizon_bars: int) -> float:
+    """Return the original, pre-declared label threshold without looking at future folds."""
+    volatility = float(df["return_1"].std())
+    if not math.isfinite(volatility):
+        volatility = 0.0
+    return max(volatility * math.sqrt(horizon_bars) * 0.25, 0.0005)
+
+
+def make_labels(
+    df: pd.DataFrame,
+    horizon_bars: int,
+    threshold: float | None = None,
+) -> pd.DataFrame:
+    """Create matured labels only; the final ``horizon_bars`` rows are never labelled as zero."""
+    if horizon_bars < 1:
+        raise ValueError("horizon_bars must be at least 1")
     out = df.copy()
     out["future_return"] = out["close"].shift(-horizon_bars) / out["close"] - 1
-    threshold = max(out["return_1"].std() * math.sqrt(horizon_bars) * 0.25, 0.0005)
-    out["target"] = np.where(out["future_return"] > threshold, 1, 0)
-    return out.dropna()
+    label_threshold = calculate_label_threshold(out, horizon_bars) if threshold is None else float(threshold)
+    matured = out["future_return"].notna()
+    out["target"] = pd.Series(pd.NA, index=out.index, dtype="Int64")
+    out.loc[matured, "target"] = (out.loc[matured, "future_return"] > label_threshold).astype(int)
+    return out.loc[matured].dropna()
 
 
-def train_predict_model(df: pd.DataFrame, model_choice: str, horizon_bars: int) -> ModelResult:
-    labelled = make_labels(df, horizon_bars)
-    if len(labelled) < 160 or RandomForestClassifier is None:
-        probability = heuristic_probability(df)
-        return ModelResult(
-            probability=probability,
-            latest_probability=float(probability.iloc[-1]),
-            accuracy=None,
-            f1=None,
-            feature_importance=heuristic_importance(df),
-            model_name="Heuristic fallback",
-            fallback=True,
-        )
+def class_balance_ratio(y_train: pd.Series) -> float | None:
+    """Return n_negative / n_positive for XGBoost, including ratios below one."""
+    positives = int((y_train == 1).sum())
+    negatives = int((y_train == 0).sum())
+    if positives == 0 or negatives == 0:
+        return None
+    return negatives / positives
 
-    split = int(len(labelled) * 0.7)
-    train = labelled.iloc[:split]
-    test = labelled.iloc[split:]
-    X_train = train[FEATURE_COLUMNS]
-    y_train = train["target"].astype(int)
-    X_test = test[FEATURE_COLUMNS]
-    y_test = test["target"].astype(int)
 
-    if y_train.nunique() < 2:
-        probability = heuristic_probability(df)
-        return ModelResult(
-            probability=probability,
-            latest_probability=float(probability.iloc[-1]),
-            accuracy=None,
-            f1=None,
-            feature_importance=heuristic_importance(df),
-            model_name="Heuristic fallback",
-            fallback=True,
-        )
-
-    model_name = model_choice
+def _build_classifier(model_choice: str, y_train: pd.Series) -> Tuple[Any, str, float | None]:
+    balance_ratio = class_balance_ratio(y_train)
     if model_choice == "XGBoost":
         try:
             from xgboost import XGBClassifier
@@ -340,62 +368,235 @@ def train_predict_model(df: pd.DataFrame, model_choice: str, horizon_bars: int) 
                 subsample=0.85,
                 colsample_bytree=0.85,
                 eval_metric="logloss",
+                scale_pos_weight=balance_ratio,
                 random_state=42,
+                n_jobs=1,
+                verbosity=0,
             )
-        else:
-            model_name = "Random Forest"
-            model = RandomForestClassifier(
-                n_estimators=120,
-                max_depth=7,
-                min_samples_leaf=8,
-                class_weight="balanced_subsample",
-                random_state=42,
-                n_jobs=-1,
-            )
-    elif model_choice == "Logistic Regression":
+            return model, "XGBoost", balance_ratio
+        model_choice = "Random Forest"
+        fallback_name = "Random Forest (XGBoost unavailable)"
+    else:
+        fallback_name = "Random Forest"
+
+    if model_choice == "Logistic Regression":
         model = make_pipeline(
             StandardScaler(),
             LogisticRegression(max_iter=1200, class_weight="balanced", random_state=42),
         )
-    else:
-        model_name = "Random Forest"
-        model = RandomForestClassifier(
-            n_estimators=120,
-            max_depth=7,
-            min_samples_leaf=8,
-            class_weight="balanced_subsample",
-            random_state=42,
-            n_jobs=-1,
+        return model, "Logistic Regression", balance_ratio
+
+    model = RandomForestClassifier(
+        n_estimators=120,
+        max_depth=7,
+        min_samples_leaf=8,
+        class_weight="balanced_subsample",
+        random_state=42,
+        n_jobs=-1,
+    )
+    return model, fallback_name, balance_ratio
+
+
+def _model_feature_importance(model: Any) -> pd.Series | None:
+    estimator = list(model.named_steps.values())[-1] if hasattr(model, "named_steps") else model
+    if hasattr(estimator, "feature_importances_"):
+        return pd.Series(estimator.feature_importances_, index=FEATURE_COLUMNS, dtype=float)
+    if hasattr(estimator, "coef_"):
+        return pd.Series(np.abs(estimator.coef_[0]), index=FEATURE_COLUMNS, dtype=float)
+    return None
+
+
+def train_predict_model(
+    df: pd.DataFrame,
+    model_choice: str,
+    horizon_bars: int,
+    train_window_bars: int = ML_TRAIN_WINDOW_BARS,
+    retrain_interval: int = ML_RETRAIN_INTERVAL,
+    min_train_bars: int = ML_MIN_TRAIN_BARS,
+    prediction_start: int | None = None,
+) -> ModelResult:
+    """Generate strictly out-of-sample probabilities with a purged walk-forward loop.
+
+    The label formula is unchanged. Its threshold is estimated once from the initial
+    pre-roll training data and then frozen, so later evaluation volatility cannot
+    change earlier labels. Every fold trains a fresh model using only labels whose
+    future horizon has fully matured before that fold's first prediction.
+    """
+    if horizon_bars < 1 or train_window_bars < 1 or retrain_interval < 1 or min_train_bars < 1:
+        raise ValueError("walk-forward bar counts must all be positive")
+
+    minimum_prediction_start = min_train_bars + horizon_bars
+    first_prediction = minimum_prediction_start if prediction_start is None else max(
+        int(prediction_start), minimum_prediction_start
+    )
+    probabilities = pd.Series(np.nan, index=df.index, dtype=float)
+
+    if RandomForestClassifier is None or len(df) <= first_prediction:
+        reason = "scikit-learn is unavailable" if RandomForestClassifier is None else "not enough bars for walk-forward training"
+        return ModelResult(
+            probability=probabilities,
+            latest_probability=0.5,
+            accuracy=None,
+            f1=None,
+            feature_importance=heuristic_importance(df),
+            model_name=f"{model_choice} (not trained)",
+            fallback=True,
+            fold_metrics=pd.DataFrame(),
+            fallback_reason=reason,
+            prediction_start=first_prediction,
         )
 
-    model.fit(X_train, y_train)
-    pred = model.predict(X_test)
-    accuracy = float(accuracy_score(y_test, pred)) if accuracy_score else None
-    f1 = float(f1_score(y_test, pred, zero_division=0)) if f1_score else None
+    initial_label_end = first_prediction - horizon_bars
+    initial_train_start = max(0, initial_label_end - train_window_bars)
+    frozen_threshold = calculate_label_threshold(
+        df.iloc[initial_train_start:initial_label_end], horizon_bars
+    )
+    future_return = df["close"].shift(-horizon_bars) / df["close"] - 1
 
-    probs = pd.Series(index=labelled.index, dtype=float)
-    probs.loc[test.index] = model.predict_proba(X_test)[:, 1]
+    fold_records: List[Dict[str, object]] = []
+    oos_true_parts: List[pd.Series] = []
+    oos_pred_parts: List[pd.Series] = []
+    importance_total = pd.Series(0.0, index=FEATURE_COLUMNS)
+    importance_weight = 0
+    trained_folds = 0
+    actual_model_names: List[str] = []
 
-    # Walk-forward backtest uses model probabilities on the test window; earlier rows use a neutral value.
-    probs = probs.reindex(df.index).ffill().fillna(0.5)
+    for fold_number, predict_start in enumerate(range(first_prediction, len(df), retrain_interval), start=1):
+        predict_end = min(predict_start + retrain_interval, len(df))
+        label_end = predict_start - horizon_bars
+        train_start = max(0, label_end - train_window_bars)
 
-    if hasattr(model, "feature_importances_"):
-        importance = pd.Series(model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False)
-    elif model_choice == "XGBoost" and hasattr(model, "feature_importances_"):
-        importance = pd.Series(model.feature_importances_, index=FEATURE_COLUMNS).sort_values(ascending=False)
-    elif hasattr(model, "named_steps"):
-        coef = model.named_steps["logisticregression"].coef_[0]
-        importance = pd.Series(np.abs(coef), index=FEATURE_COLUMNS).sort_values(ascending=False)
+        # Include the h future bars needed to mature the final training label, but no prediction-block bars.
+        training_history = df.iloc[train_start:predict_start]
+        train = make_labels(training_history, horizon_bars, threshold=frozen_threshold)
+        y_train = train["target"].astype(int)
+        positives = int((y_train == 1).sum())
+        negatives = int((y_train == 0).sum())
+        record: Dict[str, object] = {
+            "fold": fold_number,
+            "train_start": train.index.min() if not train.empty else None,
+            "train_end": train.index.max() if not train.empty else None,
+            "predict_start": df.index[predict_start],
+            "predict_end": df.index[predict_end - 1],
+            "train_size": int(len(train)),
+            "n_positive": positives,
+            "n_negative": negatives,
+            "train_positive_rate": float(y_train.mean()) if len(y_train) else np.nan,
+            "label_threshold": frozen_threshold,
+            "status": "trained",
+        }
+
+        if len(train) < min_train_bars or y_train.nunique() < 2:
+            record.update(
+                {
+                    "status": "skipped_insufficient_rows" if len(train) < min_train_bars else "skipped_one_class",
+                    "model": None,
+                    "scale_pos_weight": np.nan,
+                    "eval_size": 0,
+                    "accuracy": np.nan,
+                    "balanced_accuracy": np.nan,
+                    "f1": np.nan,
+                    "oos_positive_rate": np.nan,
+                    "predicted_positive_rate": np.nan,
+                    "tn": np.nan,
+                    "fp": np.nan,
+                    "fn": np.nan,
+                    "tp": np.nan,
+                }
+            )
+            fold_records.append(record)
+            continue
+
+        model, actual_model_name, balance_ratio = _build_classifier(model_choice, y_train)
+        model.fit(train[FEATURE_COLUMNS], y_train)
+        prediction_frame = df.iloc[predict_start:predict_end]
+        fold_probability = pd.Series(
+            model.predict_proba(prediction_frame[FEATURE_COLUMNS])[:, 1],
+            index=prediction_frame.index,
+            dtype=float,
+        )
+        probabilities.loc[prediction_frame.index] = fold_probability
+        trained_folds += 1
+        actual_model_names.append(actual_model_name)
+
+        importance = _model_feature_importance(model)
+        if importance is not None:
+            importance_total = importance_total.add(importance * len(prediction_frame), fill_value=0)
+            importance_weight += len(prediction_frame)
+
+        matured_mask = future_return.iloc[predict_start:predict_end].notna()
+        eval_index = prediction_frame.index[matured_mask.to_numpy()]
+        y_true = (future_return.loc[eval_index] > frozen_threshold).astype(int)
+        y_pred = pd.Series(model.predict(df.loc[eval_index, FEATURE_COLUMNS]), index=eval_index, dtype=int)
+        if len(y_true):
+            oos_true_parts.append(y_true)
+            oos_pred_parts.append(y_pred)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+            fold_accuracy = float(accuracy_score(y_true, y_pred))
+            fold_balanced_accuracy = float(balanced_accuracy_score(y_true, y_pred))
+            fold_f1 = float(f1_score(y_true, y_pred, zero_division=0))
+        else:
+            tn = fp = fn = tp = np.nan
+            fold_accuracy = fold_balanced_accuracy = fold_f1 = np.nan
+
+        record.update(
+            {
+                "model": actual_model_name,
+                "scale_pos_weight": balance_ratio,
+                "eval_size": int(len(y_true)),
+                "accuracy": fold_accuracy,
+                "balanced_accuracy": fold_balanced_accuracy,
+                "f1": fold_f1,
+                "oos_positive_rate": float(y_true.mean()) if len(y_true) else np.nan,
+                "predicted_positive_rate": float(y_pred.mean()) if len(y_pred) else np.nan,
+                "tn": tn,
+                "fp": fp,
+                "fn": fn,
+                "tp": tp,
+            }
+        )
+        fold_records.append(record)
+
+    if oos_true_parts:
+        all_true = pd.concat(oos_true_parts).sort_index()
+        all_pred = pd.concat(oos_pred_parts).sort_index()
+        accuracy = float(accuracy_score(all_true, all_pred))
+        f1 = float(f1_score(all_true, all_pred, zero_division=0))
+        label_positive_rate = float(all_true.mean())
+        predicted_positive_rate = float(all_pred.mean())
     else:
-        importance = heuristic_importance(df)
+        accuracy = f1 = label_positive_rate = predicted_positive_rate = None
 
+    importance = (
+        (importance_total / importance_weight).sort_values(ascending=False)
+        if importance_weight
+        else heuristic_importance(df)
+    )
+    if actual_model_names:
+        model_name = actual_model_names[-1]
+        fallback = model_name.endswith("unavailable)")
+        fallback_reason = "XGBoost unavailable; Random Forest used" if fallback else None
+    else:
+        model_name = f"{model_choice} (not trained)"
+        fallback = True
+        fallback_reason = "every walk-forward fold lacked enough rows or both target classes"
+
+    latest_probability = float(probabilities.iloc[-1]) if pd.notna(probabilities.iloc[-1]) else 0.5
     return ModelResult(
-        probability=probs,
-        latest_probability=float(probs.iloc[-1]),
+        probability=probabilities,
+        latest_probability=latest_probability,
         accuracy=accuracy,
         f1=f1,
         feature_importance=importance,
         model_name=model_name,
+        fallback=fallback,
+        prediction_coverage=float(probabilities.notna().mean()),
+        walk_forward_folds=trained_folds,
+        oos_label_positive_rate=label_positive_rate,
+        oos_predicted_positive_rate=predicted_positive_rate,
+        fold_metrics=pd.DataFrame(fold_records),
+        fallback_reason=fallback_reason,
+        prediction_start=first_prediction,
     )
 
 
@@ -453,6 +654,7 @@ def fetch_news_sentiment(ticker: str) -> Tuple[float, List[str]]:
     if yf is None:
         return 0.0, ["News API unavailable; using neutral sentiment."]
     try:
+        configure_yfinance_cache()
         news = yf.Ticker(ticker).news or []
     except Exception:
         return 0.0, ["News request failed; using neutral sentiment."]
@@ -643,6 +845,21 @@ def build_strategy_signals(
     return signal
 
 
+def build_adaptive_risk_series(
+    df: pd.DataFrame,
+    stop_loss_mult: float,
+    take_profit_mult: float,
+    max_hold_bars: int,
+) -> Tuple[pd.Series, pd.Series]:
+    """Build the app's pre-declared volatility-scaled risk limits."""
+    vol_floor = df["volatility"].dropna().median() if df["volatility"].notna().any() else 0.001
+    vol = df["volatility"].fillna(vol_floor).clip(lower=vol_floor * 0.25)
+    horizon_scale = math.sqrt(min(max_hold_bars, 60))
+    stop_loss = (stop_loss_mult * vol * horizon_scale).clip(lower=0.0015, upper=0.05)
+    take_profit = (take_profit_mult * vol * horizon_scale).clip(lower=0.003, upper=0.10)
+    return stop_loss, take_profit
+
+
 def backtest(
     df: pd.DataFrame,
     signal: pd.Series,
@@ -660,11 +877,12 @@ def backtest(
     trades: List[Dict[str, object]] = []
     curve = []
     cost_rate = transaction_cost_bps / 10000
+    execution_signal = signal.reindex(df.index).shift(1).fillna("Hold")
 
     rows = list(df.iterrows())
     for i, (ts, row) in enumerate(rows):
         price = float(row["close"])
-        current_signal = signal.loc[ts]
+        current_signal = execution_signal.loc[ts]
 
         if position is not None:
             side = position["side"]
@@ -679,6 +897,8 @@ def backtest(
                 exit_reason = "time exit"
             elif (side == 1 and current_signal == "Sell") or (side == -1 and current_signal == "Buy"):
                 exit_reason = "opposite signal"
+            elif i == len(rows) - 1:
+                exit_reason = "end of window"
 
             mark_to_market = cash + position["notional"] * raw_return
             equity = mark_to_market
@@ -700,11 +920,12 @@ def backtest(
                         "exit_reason": exit_reason,
                         "stop_loss_pct": position["stop_loss"] * 100,
                         "take_profit_pct": position["take_profit"] * 100,
+                        "execution_note": "Signal shifted by one bar; entry/exit use the next completed candle close",
                     }
                 )
                 position = None
 
-        can_open = current_signal == "Buy" or (allow_short and current_signal == "Sell")
+        can_open = i < len(rows) - 1 and (current_signal == "Buy" or (allow_short and current_signal == "Sell"))
         if position is None and can_open:
             notional = max(cash * position_size, 0)
             if notional > 0:
@@ -718,7 +939,15 @@ def backtest(
                     "take_profit": float(take_profit.loc[ts]),
                 }
 
-        curve.append({"time": ts, "equity": equity, "signal": current_signal, "close": price})
+        curve.append(
+            {
+                "time": ts,
+                "equity": equity,
+                "raw_signal": signal.loc[ts],
+                "execution_signal": current_signal,
+                "close": price,
+            }
+        )
 
     trades_df = pd.DataFrame(trades)
     curve_df = pd.DataFrame(curve).set_index("time")
@@ -783,9 +1012,9 @@ def explain_signal(df: pd.DataFrame, signal: str, ml_result: ModelResult, strate
         )
     if strategy == ML_CLASSIFIER_STRATEGY:
         accuracy_note = (
-            f"held-out accuracy {ml_result.accuracy:.1%} (F1 {ml_result.f1:.2f})"
+            f"walk-forward OOS accuracy {ml_result.accuracy:.1%} (F1 {ml_result.f1:.2f})"
             if ml_result.accuracy is not None
-            else "not enough labelled bars yet, so it fell back to a heuristic score"
+            else "no evaluable walk-forward predictions are available yet"
         )
         return (
             f"The {ml_result.model_name} classifier generated **{signal}** from a predicted probability of "
@@ -852,10 +1081,10 @@ def main() -> None:
             news_weight = 0.15
             risk_weight = 0.15
             st.header("Factor tuning")
-            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, 0.40, 0.05)
-            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, 0.35, 0.05)
-            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, 0.25, 0.05)
-            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, 0.35, 0.05)
+            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_MOMENTUM_WEIGHT, 0.05)
+            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_MEAN_REVERSION_WEIGHT, 0.05)
+            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_FLOW_WEIGHT, 0.05)
+            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, MULTIFACTOR_DEFAULT_VOLATILITY_WEIGHT, 0.05)
             buy_threshold = st.slider("Factor buy threshold", 0.10, 1.20, MULTIFACTOR_BUY_THRESHOLD, 0.05)
             sell_threshold = st.slider("Factor sell threshold", -1.20, -0.10, MULTIFACTOR_SELL_THRESHOLD, 0.05)
         elif strategy == ML_CLASSIFIER_STRATEGY:
@@ -990,13 +1219,12 @@ def main() -> None:
             risk_weight,
         )
         if adaptive_risk:
-            vol_floor = data["volatility"].dropna().median() if data["volatility"].notna().any() else 0.001
-            vol = data["volatility"].fillna(vol_floor).clip(lower=vol_floor * 0.25)
-            # Scale single-bar volatility up to the expected holding horizon (random-walk sqrt-time rule) so the
-            # stop reflects the move a trade could plausibly make before its natural exit, not just the next bar.
-            horizon_scale = math.sqrt(min(max_hold_bars, 60))
-            stop_loss_series = (stop_loss_mult * vol * horizon_scale).clip(lower=0.0015, upper=0.05)
-            take_profit_series = (take_profit_mult * vol * horizon_scale).clip(lower=0.003, upper=0.10)
+            stop_loss_series, take_profit_series = build_adaptive_risk_series(
+                data,
+                stop_loss_mult,
+                take_profit_mult,
+                max_hold_bars,
+            )
         else:
             stop_loss_series = pd.Series(stop_loss, index=data.index)
             take_profit_series = pd.Series(take_profit, index=data.index)
@@ -1154,23 +1382,41 @@ def main() -> None:
                 f"sell threshold {sell_threshold:.2f}."
             )
         elif strategy == ML_CLASSIFIER_STRATEGY:
-            col_b.metric("Held-out accuracy", f"{ml_result.accuracy:.1%}" if ml_result.accuracy is not None else "n/a")
+            col_b.metric("Walk-forward accuracy", f"{ml_result.accuracy:.1%}" if ml_result.accuracy is not None else "n/a")
             col_c.metric("F1 score", f"{ml_result.f1:.2f}" if ml_result.f1 is not None else "n/a")
             if ml_result.fallback:
-                st.warning(
-                    "Not enough labelled bars for this window to train/evaluate the model, so the app fell back "
-                    "to a heuristic score. Try a longer time range."
-                )
+                st.warning(f"Classifier fallback/skip: {ml_result.fallback_reason or 'unknown reason'}.")
+            label_rate_text = (
+                f"{ml_result.oos_label_positive_rate:.1%}"
+                if ml_result.oos_label_positive_rate is not None
+                else "n/a"
+            )
+            predicted_rate_text = (
+                f"{ml_result.oos_predicted_positive_rate:.1%}"
+                if ml_result.oos_predicted_positive_rate is not None
+                else "n/a"
+            )
+            st.caption(
+                f"Walk-forward folds trained: {ml_result.walk_forward_folds}; genuine OOS probability coverage: "
+                f"{ml_result.prediction_coverage:.1%}; OOS positive-label rate: "
+                f"{label_rate_text}; predicted-positive rate at 0.50: {predicted_rate_text}."
+            )
             st.markdown(
                 f"""
-                - Trains on a 70/30 chronological split (no shuffling) so the held-out accuracy/F1 reflect a
-                  genuine out-of-sample test, not lookahead.
+                - Uses a purged walk-forward loop: after an initial {ML_MIN_TRAIN_BARS}-bar warm-up, a fresh model
+                  trains on at most {ML_TRAIN_WINDOW_BARS} past labelled bars and predicts the next
+                  {ML_RETRAIN_INTERVAL} bars. The final horizon labels before each prediction block are purged.
+                - The original label formula is unchanged. Its volatility threshold is estimated from the initial
+                  pre-roll training data and frozen before out-of-sample prediction begins.
                 - `Buy`: predicted probability of a price rise is at or above the buy threshold and volume is valid.
                 - `Sell`: predicted probability drops to or below the sell threshold.
                 - Features: {', '.join(FEATURE_COLUMNS)}.
                 - Backtest mode here is long-only: a sell signal closes longs and does not open a new short.
                 """
             )
+            if ml_result.fold_metrics is not None and not ml_result.fold_metrics.empty:
+                with st.expander("Walk-forward fold and class-balance diagnostics"):
+                    st.dataframe(ml_result.fold_metrics, use_container_width=True, hide_index=True)
             if not ml_result.feature_importance.empty and go is not None:
                 importance = ml_result.feature_importance.sort_values()
                 fig_importance = go.Figure(go.Bar(x=importance.values, y=importance.index, orientation="h"))

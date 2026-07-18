@@ -1,0 +1,81 @@
+{
+  "run_timestamp": "2026-07-18T06:00:15.489098+00:00",
+  "source": "Yahoo Finance via yfinance",
+  "period_requested": "60d",
+  "interval": "5m",
+  "evaluation_days": 30,
+  "tickers": [
+    "AAPL",
+    "TSLA",
+    "NVDA",
+    "CBA.AX"
+  ],
+  "fixed_assumptions": {
+    "initial_capital": 100000.0,
+    "position_size": 0.2,
+    "transaction_cost_bps_per_side": 2.0,
+    "max_hold_bars": 24,
+    "horizon_bars": 1,
+    "ml_min_train_bars": 200,
+    "ml_train_window_bars": 1000,
+    "ml_retrain_interval": 200
+  },
+  "tickers_data": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "0a50471f057a0e492d14f32c2d09ddbab35425e122d522f5a182b4eb49e4a3bc",
+      "status": "live",
+      "indicator_bars": 4656,
+      "evaluation_bars": 1560
+    },
+    "TSLA": {
+      "ticker": "TSLA",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "86b59cd1754e82be940b85e6f46b3c422af7fa4e86c6264dad2b37f736e8c619",
+      "status": "live",
+      "indicator_bars": 4656,
+      "evaluation_bars": 1561
+    },
+    "NVDA": {
+      "ticker": "NVDA",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "d58a33ac8744c19358390d743277a43d62b394425553f65938f967692fe0e978",
+      "status": "live",
+      "indicator_bars": 4646,
+      "evaluation_bars": 1561
+    },
+    "CBA.AX": {
+      "ticker": "CBA.AX",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4385,
+      "first_bar": "2026-04-24 10:00:00+10:00",
+      "last_bar": "2026-07-17 16:10:00+10:00",
+      "evaluation_cutoff": "2026-06-17 16:10:00+10:00",
+      "sha256": "0015215685a06d9fa39e8d02f0dfd3f10b90ab425a5b90f113f7625140e36493",
+      "status": "live",
+      "indicator_bars": 4297,
+      "evaluation_bars": 1588
+    }
+  }
+}
