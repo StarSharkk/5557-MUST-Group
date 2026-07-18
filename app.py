@@ -77,7 +77,80 @@ class ModelResult:
     fallback: bool = False
 
 
-st.set_page_config(page_title=APP_TITLE, page_icon="chart_with_upwards_trend", layout="wide")
+st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
+
+CUSTOM_CSS = """
+<style>
+#MainMenu, footer {visibility: hidden;}
+.block-container {padding-top: 1.5rem; max-width: 1200px;}
+
+.app-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    padding: 1.5rem 1.75rem;
+    margin: -0.5rem 0 1.75rem 0;
+    background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px -12px rgba(15, 23, 42, 0.45);
+}
+.app-header .app-brand {display: flex; flex-direction: column; gap: 0.4rem;}
+.app-header .app-badge {
+    display: inline-block;
+    width: fit-content;
+    background: rgba(96, 165, 250, 0.18);
+    color: #93C5FD;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.22rem 0.65rem;
+    border-radius: 999px;
+}
+.app-header h1 {
+    color: #F8FAFC;
+    font-size: 1.7rem;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+}
+.app-header p {
+    color: #94A3B8;
+    font-size: 0.88rem;
+    margin: 0;
+}
+.app-header .app-meta {
+    color: #64748B;
+    font-size: 0.78rem;
+    text-align: right;
+    white-space: nowrap;
+}
+@media (max-width: 640px) {
+    .app-header .app-meta {text-align: left; white-space: normal;}
+}
+
+.section-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #64748B;
+    margin: 0 0 0.5rem 0.1rem;
+}
+
+div[data-testid="stMetric"] {
+    background: #FFFFFF;
+}
+div[data-testid="stMetricLabel"] {
+    font-size: 0.78rem;
+    color: #64748B;
+}
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 def clean_ticker(ticker: str) -> str:
@@ -732,8 +805,19 @@ def format_pct(value: float) -> str:
 
 
 def main() -> None:
-    st.title(APP_TITLE)
-    st.caption("Educational simulator only. This is not financial advice and does not execute real trades.")
+    st.markdown(
+        f"""
+        <div class="app-header">
+            <div class="app-brand">
+                <span class="app-badge">Educational Simulator</span>
+                <h1>{APP_TITLE}</h1>
+                <p>Not financial advice — the app does not execute real trades.</p>
+            </div>
+            <div class="app-meta">FINS5557 · Track A<br/>Tech Team</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.header("User choices")
@@ -931,34 +1015,40 @@ def main() -> None:
         metrics = performance_metrics(trades, equity_curve, initial_capital)
     elapsed = time.time() - start
 
-    status_cols = st.columns(4)
-    status_cols[0].metric("Ticker", ticker)
-    status_cols[1].metric("Bars loaded", f"{len(data):,}")
-    status_cols[2].metric("Strategy", strategy)
-    status_cols[3].metric("Latest signal", signals.iloc[-1])
+    st.markdown('<p class="section-label">Run summary</p>', unsafe_allow_html=True)
+    with st.container(border=True):
+        status_cols = st.columns(4)
+        status_cols[0].metric("Ticker", ticker)
+        status_cols[1].metric("Bars loaded", f"{len(data):,}")
+        status_cols[2].metric("Strategy", strategy)
+        status_cols[3].metric("Latest signal", signals.iloc[-1])
 
-    if data_status.startswith("demo"):
-        st.warning(f"{data_status}. The app remains runnable for demonstration, but final report metrics should use live data.")
-    else:
-        st.success(f"{data_status}. Computed in {elapsed:.1f}s.")
-    if adaptive_risk:
-        st.caption(
-            f"Adaptive risk control this run: median stop-loss {stop_loss_series.median():.2%}, "
-            f"median take-profit {take_profit_series.median():.2%} (scaled from recent volatility, "
-            f"not the flat 1%/2% defaults)."
-        )
-    st.markdown("### AI explanation")
-    st.write(explain_signal(data, signals.iloc[-1], ml_result, strategy, news_score))
+        if data_status.startswith("demo"):
+            st.warning(f"{data_status}. The app remains runnable for demonstration, but final report metrics should use live data.")
+        else:
+            st.success(f"{data_status}. Computed in {elapsed:.1f}s.")
+        if adaptive_risk:
+            st.caption(
+                f"Adaptive risk control this run: median stop-loss {stop_loss_series.median():.2%}, "
+                f"median take-profit {take_profit_series.median():.2%} (scaled from recent volatility, "
+                f"not the flat 1%/2% defaults)."
+            )
 
-    perf_cols = st.columns(7)
-    perf_cols[0].metric("Total return", format_pct(metrics["total_return"]))
-    perf_cols[1].metric("Sharpe ratio", f"{metrics['sharpe']:.2f}")
-    perf_cols[2].metric("Max drawdown", format_pct(metrics["max_drawdown"]))
-    perf_cols[3].metric("Win rate", format_pct(metrics["win_rate"]))
-    perf_cols[4].metric("Avg P/L per trade", f"${metrics['avg_profit']:,.2f}")
-    perf_cols[5].metric("Number of trades", f"{metrics['trades']:,}")
-    pf = metrics["profit_factor"]
-    perf_cols[6].metric("Profit factor", "inf" if math.isinf(pf) else f"{pf:.2f}")
+    st.markdown('<p class="section-label">AI explanation</p>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.write(explain_signal(data, signals.iloc[-1], ml_result, strategy, news_score))
+
+    st.markdown('<p class="section-label">Performance</p>', unsafe_allow_html=True)
+    with st.container(border=True):
+        perf_cols = st.columns(7)
+        perf_cols[0].metric("Total return", format_pct(metrics["total_return"]))
+        perf_cols[1].metric("Sharpe ratio", f"{metrics['sharpe']:.2f}")
+        perf_cols[2].metric("Max drawdown", format_pct(metrics["max_drawdown"]))
+        perf_cols[3].metric("Win rate", format_pct(metrics["win_rate"]))
+        perf_cols[4].metric("Avg P/L per trade", f"${metrics['avg_profit']:,.2f}")
+        perf_cols[5].metric("Number of trades", f"{metrics['trades']:,}")
+        pf = metrics["profit_factor"]
+        perf_cols[6].metric("Profit factor", "inf" if math.isinf(pf) else f"{pf:.2f}")
 
     tab_chart, tab_trades, tab_model, tab_breakdown, tab_data, tab_news = st.tabs(
         ["Price & Signals", "Trade Log", "Strategy Rules", "Factor Breakdown", "Data & Indicators", "News Sentiment"]
