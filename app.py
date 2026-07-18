@@ -100,78 +100,6 @@ class ModelResult:
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
 
-CUSTOM_CSS = """
-<style>
-#MainMenu, footer {visibility: hidden;}
-.block-container {padding-top: 1.5rem; max-width: 1200px;}
-
-.app-header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem 1.5rem;
-    padding: 1.5rem 1.75rem;
-    margin: -0.5rem 0 1.75rem 0;
-    background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%);
-    border-radius: 14px;
-    box-shadow: 0 8px 24px -12px rgba(15, 23, 42, 0.45);
-}
-.app-header .app-brand {display: flex; flex-direction: column; gap: 0.4rem;}
-.app-header .app-badge {
-    display: inline-block;
-    width: fit-content;
-    background: rgba(96, 165, 250, 0.18);
-    color: #93C5FD;
-    font-size: 0.68rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 0.22rem 0.65rem;
-    border-radius: 999px;
-}
-.app-header h1 {
-    color: #F8FAFC;
-    font-size: 1.7rem;
-    font-weight: 700;
-    margin: 0;
-    letter-spacing: -0.01em;
-    line-height: 1.2;
-}
-.app-header p {
-    color: #94A3B8;
-    font-size: 0.88rem;
-    margin: 0;
-}
-.app-header .app-meta {
-    color: #64748B;
-    font-size: 0.78rem;
-    text-align: right;
-    white-space: nowrap;
-}
-@media (max-width: 640px) {
-    .app-header .app-meta {text-align: left; white-space: normal;}
-}
-
-.section-label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #64748B;
-    margin: 0 0 0.5rem 0.1rem;
-}
-
-div[data-testid="stMetric"] {
-    background: #FFFFFF;
-}
-div[data-testid="stMetricLabel"] {
-    font-size: 0.78rem;
-    color: #64748B;
-}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 def clean_ticker(ticker: str) -> str:
@@ -1033,20 +961,300 @@ def format_pct(value: float) -> str:
     return f"{value:.2%}"
 
 
-def main() -> None:
+def inject_visual_theme() -> None:
+    """Apply the light research-console theme without changing app content or behavior."""
     st.markdown(
-        f"""
-        <div class="app-header">
-            <div class="app-brand">
-                <span class="app-badge">Educational Simulator</span>
-                <h1>{APP_TITLE}</h1>
-                <p>Not financial advice — the app does not execute real trades.</p>
-            </div>
-            <div class="app-meta">FINS5557 · Track A<br/>Tech Team</div>
-        </div>
+        """
+        <style>
+        :root {
+            --navy: #17344f;
+            --teal: #145b69;
+            --ink: #263849;
+            --muted: #647789;
+            --canvas: #f5f8fa;
+            --panel: #ffffff;
+            --line: #d7e2e8;
+            --table-blue: #dcecf0;
+            --amber: #f2b134;
+            --amber-soft: #fff3d9;
+            --green: #2d806c;
+            --green-soft: #e8f5ef;
+        }
+
+        .stApp {
+            background: var(--canvas);
+            color: var(--ink);
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background:
+                linear-gradient(180deg, rgba(220, 236, 240, 0.36) 0%, rgba(245, 248, 250, 0) 280px),
+                var(--canvas);
+        }
+
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        .block-container {
+            max-width: 1480px;
+            padding: 2.25rem 3rem 4rem;
+        }
+
+        h1, h2, h3, h4 {
+            color: var(--navy) !important;
+            letter-spacing: -0.02em;
+        }
+
+        h1 {
+            margin: 0 0 0.2rem 0;
+            padding: 0 0 0.8rem 0;
+            border-bottom: 3px solid var(--amber);
+            font-size: clamp(2rem, 3vw, 2.85rem) !important;
+            font-weight: 800 !important;
+        }
+
+        h2, h3 {
+            color: var(--teal) !important;
+            font-weight: 760 !important;
+        }
+
+        h4 {
+            font-weight: 720 !important;
+        }
+
+        p, li, label, [data-testid="stCaptionContainer"] {
+            color: var(--ink);
+        }
+
+        [data-testid="stCaptionContainer"] {
+            color: var(--muted) !important;
+        }
+
+        .section-label {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+            margin: 0 0 0.5rem 0.1rem;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #edf4f6;
+            border-right: 1px solid var(--line);
+        }
+
+        [data-testid="stSidebar"] > div:first-child {
+            padding: 1.15rem 1rem 2rem;
+        }
+
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 {
+            margin-top: 1.15rem;
+            padding: 0.35rem 0 0.35rem 0.7rem;
+            border-left: 4px solid var(--amber);
+            color: var(--navy) !important;
+            font-size: 1.05rem !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+            gap: 0.62rem;
+        }
+
+        [data-testid="stMetric"] {
+            min-height: 6.15rem;
+            padding: 1rem 1.1rem;
+            border: 1px solid var(--line);
+            border-top: 3px solid #8fc8d1;
+            border-radius: 14px;
+            background: var(--panel);
+            box-shadow: 0 8px 24px rgba(23, 52, 79, 0.07);
+        }
+
+        [data-testid="stMetricLabel"] p {
+            color: var(--muted) !important;
+            font-size: 0.76rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.04em;
+            line-height: 1.12 !important;
+            white-space: normal !important;
+            text-transform: uppercase;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: var(--navy) !important;
+            overflow: visible !important;
+            font-weight: 800 !important;
+        }
+
+        [data-testid="stMetricValue"] > div {
+            overflow: visible !important;
+            white-space: normal !important;
+            text-overflow: clip !important;
+            font-size: clamp(1.2rem, 2.05vw, 1.85rem) !important;
+            line-height: 1.12 !important;
+        }
+
+        [data-testid="stMetricDelta"] {
+            color: var(--teal) !important;
+        }
+
+        [data-testid="stTabs"] {
+            margin-top: 1.2rem;
+        }
+
+        [data-testid="stTabs"] > div:first-child {
+            border-bottom: 1px solid var(--line);
+        }
+
+        [data-testid="stTabs"] button[role="tab"] {
+            color: var(--muted);
+            font-weight: 700;
+            padding: 0.72rem 0.82rem;
+        }
+
+        [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+            color: var(--navy);
+        }
+
+        [data-testid="stTabs"] button[role="tab"] [data-testid="stMarkdownContainer"] p {
+            color: inherit;
+        }
+
+        [data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+            background: var(--amber);
+            height: 3px;
+        }
+
+        [data-testid="stPlotlyChart"],
+        [data-testid="stDataFrame"],
+        [data-testid="stExpander"] {
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--panel);
+            box-shadow: 0 8px 24px rgba(23, 52, 79, 0.05);
+        }
+
+        [data-testid="stPlotlyChart"] {
+            padding: 0.3rem 0.35rem 0.1rem;
+            overflow: hidden;
+        }
+
+        [data-testid="stDataFrame"] {
+            overflow: hidden;
+        }
+
+        [data-testid="stExpander"] summary {
+            color: var(--navy);
+            font-weight: 700;
+        }
+
+        [data-testid="stAlert"] {
+            border-radius: 12px;
+            border-width: 1px;
+        }
+
+        [data-testid="stAlert"] [data-testid="stMarkdownContainer"] p {
+            color: inherit;
+        }
+
+        [data-baseweb="select"] > div,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextInput"] input {
+            border-color: #c4d5dd;
+            border-radius: 9px;
+            background: var(--panel);
+        }
+
+        [data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {
+            background: var(--teal);
+            border-color: var(--teal);
+        }
+
+        [data-testid="stSlider"] [data-baseweb="slider"] > div:first-child > div:first-child {
+            background: var(--teal) !important;
+        }
+
+        [data-testid="stSlider"] [data-testid="stThumbValue"] {
+            color: var(--teal) !important;
+            background: transparent !important;
+            font-size: 0.84rem !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stSlider"] [data-testid="stTickBarMin"],
+        [data-testid="stSlider"] [data-testid="stTickBarMax"] {
+            color: var(--muted) !important;
+            background: transparent !important;
+            font-size: 0.72rem !important;
+            font-weight: 600 !important;
+        }
+
+        [data-testid="stDownloadButton"] button,
+        [data-testid="stButton"] button {
+            border: 1px solid #9bc5cc;
+            border-radius: 9px;
+            color: var(--navy);
+            background: #f7fbfc;
+            font-weight: 700;
+        }
+
+        [data-testid="stDownloadButton"] button:hover,
+        [data-testid="stButton"] button:hover {
+            border-color: var(--teal);
+            color: var(--teal);
+        }
+
+        hr {
+            border-color: var(--line) !important;
+        }
+
+        code {
+            color: var(--teal);
+            background: var(--table-blue);
+            border-radius: 4px;
+        }
+
+        @media (max-width: 900px) {
+            .block-container {
+                padding: 1.35rem 1rem 3rem;
+            }
+
+            [data-testid="stMetric"] {
+                min-height: 5.25rem;
+                padding: 0.8rem;
+            }
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def style_plotly_figure(fig: Any, height: int | None = None) -> Any:
+    """Keep every chart aligned with the PDF-inspired navy/teal research-console theme."""
+    layout = {
+        "template": "plotly_white",
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "#fbfdfe",
+        "font": {"family": "Arial, sans-serif", "color": "#17344f", "size": 12},
+        "hoverlabel": {"bgcolor": "#17344f", "font": {"color": "#ffffff"}},
+        "legend": {"bgcolor": "rgba(255,255,255,0.88)", "bordercolor": "#d7e2e8", "borderwidth": 1},
+        "margin": {"l": 18, "r": 18, "t": 48, "b": 18},
+    }
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(**layout)
+    fig.update_xaxes(showgrid=True, gridcolor="#e3edf0", linecolor="#cbd9df", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="#e3edf0", linecolor="#cbd9df", zeroline=False)
+    return fig
+
+
+def main() -> None:
+    inject_visual_theme()
+    st.title(APP_TITLE)
+    st.caption("Educational simulator only. This is not financial advice and does not execute real trades.")
 
     with st.sidebar:
         st.header("User choices")
@@ -1321,11 +1529,13 @@ def main() -> None:
                 )
             )
             fig.update_layout(height=620, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+            style_plotly_figure(fig, 620)
             st.plotly_chart(fig, use_container_width=True)
 
             eq_fig = px.line(equity_curve, y="equity", title="Equity curve") if px else None
             if eq_fig:
                 eq_fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(eq_fig, 360)
                 st.plotly_chart(eq_fig, use_container_width=True)
 
     with tab_trades:
@@ -1421,6 +1631,7 @@ def main() -> None:
                 importance = ml_result.feature_importance.sort_values()
                 fig_importance = go.Figure(go.Bar(x=importance.values, y=importance.index, orientation="h"))
                 fig_importance.update_layout(title="Feature importance", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(fig_importance, 360)
                 st.plotly_chart(fig_importance, use_container_width=True)
         else:
             col_b.metric("Buy RSI cross", f">{FREQTRADE_BUY_RSI}")
@@ -1464,6 +1675,7 @@ def main() -> None:
                     )
                 )
                 fig_team.update_layout(title="Latest team contribution", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(fig_team, 360)
                 st.plotly_chart(fig_team, use_container_width=True)
 
                 team_ts = go.Figure()
@@ -1471,6 +1683,7 @@ def main() -> None:
                 team_ts.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
                 team_ts.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
                 team_ts.update_layout(title="Manager score over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(team_ts, 360)
                 st.plotly_chart(team_ts, use_container_width=True)
         elif strategy == MULTIFACTOR_STRATEGY:
             latest_breakdown = factor_components[["momentum", "mean_reversion", "flow_trend", "volatility_penalty"]].iloc[-1]
@@ -1497,6 +1710,7 @@ def main() -> None:
                     )
                 )
                 fig_breakdown.update_layout(title="Latest factor contribution", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(fig_breakdown, 360)
                 st.plotly_chart(fig_breakdown, use_container_width=True)
 
                 ts_fig = go.Figure()
@@ -1504,6 +1718,7 @@ def main() -> None:
                 ts_fig.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
                 ts_fig.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
                 ts_fig.update_layout(title="Factor score over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(ts_fig, 360)
                 st.plotly_chart(ts_fig, use_container_width=True)
         elif strategy == ML_CLASSIFIER_STRATEGY:
             if go is not None:
@@ -1512,6 +1727,7 @@ def main() -> None:
                 prob_fig.add_hline(y=buy_threshold, line_dash="dash", line_color="green")
                 prob_fig.add_hline(y=sell_threshold, line_dash="dash", line_color="red")
                 prob_fig.update_layout(title="Predicted probability over time", height=360, margin=dict(l=10, r=10, t=50, b=10))
+                style_plotly_figure(prob_fig, 360)
                 st.plotly_chart(prob_fig, use_container_width=True)
             if not ml_result.feature_importance.empty:
                 st.dataframe(ml_result.feature_importance.rename("importance"), use_container_width=True)
