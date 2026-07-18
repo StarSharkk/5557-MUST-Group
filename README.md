@@ -72,6 +72,13 @@ including losses, remains in `all_trades.csv`. Historical Yahoo news snapshots a
 not available, so the scan uses an explicitly recorded neutral news score instead of
 leaking current headlines into past bars.
 
+The aggregate scan selected the Multi-factor default candidate
+`momentum=0.55, mean_reversion=0.25, flow=0.20, volatility_penalty=0.20`:
+it improved both Sharpe and profit factor on at least three of four tickers in
+three of four sub-windows. This is a reproducible selection rule for the current
+frozen sample, not a guarantee of future profitability; the original baseline and
+all negative outcomes remain reported.
+
 ## Data Notes
 
 The app uses `yfinance` for intraday OHLCV data. Yahoo Finance availability for 1-minute candles is limited, so 3-month/1-minute requests may be automatically reduced or may fall back to demo data if the provider does not return enough bars.

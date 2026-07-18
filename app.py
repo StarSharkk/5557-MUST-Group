@@ -52,6 +52,13 @@ FREQTRADE_BUY_RSI = 30
 FREQTRADE_SELL_RSI = 70
 MULTIFACTOR_BUY_THRESHOLD = 0.35
 MULTIFACTOR_SELL_THRESHOLD = -0.35
+# Candidate selected before this default change by the frozen multi-stock,
+# four-window rule: both Sharpe and PF improved on >=3/4 tickers in 3/4 windows.
+# Keep the original weights in the scanner as the explicit comparison baseline.
+MULTIFACTOR_DEFAULT_MOMENTUM_WEIGHT = 0.55
+MULTIFACTOR_DEFAULT_MEAN_REVERSION_WEIGHT = 0.25
+MULTIFACTOR_DEFAULT_FLOW_WEIGHT = 0.20
+MULTIFACTOR_DEFAULT_VOLATILITY_WEIGHT = 0.20
 TEAM_BUY_THRESHOLD = 0.20
 TEAM_SELL_THRESHOLD = -0.15
 ML_BUY_PROB_THRESHOLD = 0.55
@@ -990,10 +997,10 @@ def main() -> None:
             news_weight = 0.15
             risk_weight = 0.15
             st.header("Factor tuning")
-            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, 0.40, 0.05)
-            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, 0.35, 0.05)
-            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, 0.25, 0.05)
-            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, 0.35, 0.05)
+            momentum_weight = st.slider("Momentum weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_MOMENTUM_WEIGHT, 0.05)
+            mean_reversion_weight = st.slider("Mean-reversion weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_MEAN_REVERSION_WEIGHT, 0.05)
+            flow_weight = st.slider("Flow/trend weight", 0.0, 1.0, MULTIFACTOR_DEFAULT_FLOW_WEIGHT, 0.05)
+            volatility_weight = st.slider("Volatility penalty", 0.0, 1.0, MULTIFACTOR_DEFAULT_VOLATILITY_WEIGHT, 0.05)
             buy_threshold = st.slider("Factor buy threshold", 0.10, 1.20, MULTIFACTOR_BUY_THRESHOLD, 0.05)
             sell_threshold = st.slider("Factor sell threshold", -1.20, -0.10, MULTIFACTOR_SELL_THRESHOLD, 0.05)
         elif strategy == ML_CLASSIFIER_STRATEGY:

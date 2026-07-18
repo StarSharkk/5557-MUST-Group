@@ -488,7 +488,8 @@ def build_matrix(full_long: pd.DataFrame, window_id: str = "evaluation_full") ->
             if ticker_row.empty:
                 continue
             ticker_row = ticker_row.iloc[0]
-            model_key = str(ticker_row.get("ml_model", "n/a"))
+            model_value = ticker_row.get("ml_model", "n/a")
+            model_key = "n/a" if pd.isna(model_value) else str(model_value)
             baseline = baseline_rows.get((strategy, ticker, model_key))
             prefix = ticker.replace(".", "_")
             for field in ("total_return", "sharpe", "max_drawdown", "win_rate", "profit_factor", "trades", "ml_prediction_coverage"):
@@ -600,6 +601,12 @@ def write_summary(
         else:
             for _, row in stable_aggregate.sort_values("mean_sharpe_delta_all_cells", ascending=False).iterrows():
                 lines.append(f"- `{row['strategy']}` / `{row['config_id']}`: majority windows `{int(row['majority_windows'])}/4`, both-improved cells `{int(row['both_improved_cells'])}/16`, mean Sharpe delta `{row['mean_sharpe_delta_all_cells']:.3f}`.")
+            selected = stable_aggregate[
+                (stable_aggregate["strategy"] == app.MULTIFACTOR_STRATEGY)
+                & (stable_aggregate["config_id"] == "factor_momentum_vol0.20")
+            ]
+            if not selected.empty:
+                lines.append("The Multi-factor app default now uses momentum 0.55, mean-reversion 0.25, flow 0.20, and volatility penalty 0.20. This is a data-window candidate selected by the pre-declared aggregate rule, not a claim of universal future profitability; the original baseline and every alternative remain in the matrix.")
     lines += [
         "",
         "## ML training-window before/after check",

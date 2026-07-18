@@ -18,11 +18,20 @@ The recent 30 calendar days are evaluated after a 60-day download supplies causa
 ## Configurations with majority improvement
 
 - `ML Classifier` / `ml_xgboost_b0.60_s0.48`: both-improved `4/4`, Sharpe-improved `4/4`, PF-improved `4/4`, pooled PF `1.1831215878241084`.
+- `Multi-factor model` / `risk_sl1.5_tp4`: both-improved `4/4`, Sharpe-improved `4/4`, PF-improved `4/4`, pooled PF `1.0154201676264087`.
+- `Multi-factor model` / `risk_sl2_tp4`: both-improved `4/4`, Sharpe-improved `4/4`, PF-improved `4/4`, pooled PF `1.0154201676264087`.
+- `Multi-factor model` / `factor_momentum_vol0.20`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `1.1645432553763533`.
+- `Freqtrade Sample Strategy` / `risk_sl2_tp4`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `1.069102317824587`.
+- `Freqtrade Sample Strategy` / `risk_sl1_tp4`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `1.0355099604537352`.
+- `Multi-factor model` / `risk_sl1_tp4`: both-improved `3/4`, Sharpe-improved `4/4`, PF-improved `3/4`, pooled PF `1.0110799057823765`.
+- `Multi-factor model` / `risk_sl1.5_tp2`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `1.00205531246466`.
+- `Multi-factor model` / `risk_sl2_tp2`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `1.00205531246466`.
 - `ML Classifier` / `risk_sl1_tp4`: both-improved `3/4`, Sharpe-improved `3/4`, PF-improved `3/4`, pooled PF `0.9218268849963789`.
 
 ## Aggregate evidence across all windows
 
-No configuration improved both metrics on at least 3 of 4 stocks in at least 3 of 4 windows while also having a positive mean Sharpe delta across all paired ticker-window cells. Therefore no parameter change is promoted as universally stable.
+- `Multi-factor model` / `factor_momentum_vol0.20`: majority windows `3/4`, both-improved cells `11/16`, mean Sharpe delta `0.804`.
+The Multi-factor app default now uses momentum 0.55, mean-reversion 0.25, flow 0.20, and volatility penalty 0.20. This is a data-window candidate selected by the pre-declared aggregate rule, not a claim of universal future profitability; the original baseline and every alternative remain in the matrix.
 
 ## ML training-window before/after check
 
@@ -34,10 +43,10 @@ On the same frozen OHLCV snapshots, fixed 70/30 RF coverage was `30.0%` versus w
 
 ## Window consistency
 
-- `evaluation_early_third`: `1` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
-- `evaluation_full`: `2` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
-- `evaluation_late_third`: `1` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
-- `evaluation_middle_third`: `2` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
+- `evaluation_early_third`: `4` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
+- `evaluation_full`: `10` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
+- `evaluation_late_third`: `7` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
+- `evaluation_middle_third`: `7` of `60` configurations met the same 3/4 majority rule; inspect `parameter_window_summary.csv` for the complete cross-window matrix.
 
 ## Changes that are not broadly reliable
 
