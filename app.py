@@ -1052,10 +1052,15 @@ def inject_visual_theme() -> None:
         [data-testid="stSidebar"] h2,
         [data-testid="stSidebar"] h3 {
             margin-top: 1.15rem;
+            margin-bottom: 0.7rem;
             padding: 0.35rem 0 0.35rem 0.7rem;
             border-left: 4px solid var(--amber);
             color: var(--navy) !important;
             font-size: 1.05rem !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stHeading"] {
+            margin-bottom: 0.35rem;
         }
 
         [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
