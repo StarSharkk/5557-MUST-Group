@@ -1,0 +1,71 @@
+{
+  "status": "passed",
+  "step_1_historical_round1_reproduction": {
+    "config_id": "mta_baseline_b0.35_s-0.35",
+    "thresholds": {
+      "buy": 0.35,
+      "sell": -0.35
+    },
+    "expected": {
+      "AAPL": {
+        "total_return": 0.00854539,
+        "sharpe": 4.768292
+      },
+      "TSLA": {
+        "total_return": -0.00190905,
+        "sharpe": -0.907125
+      },
+      "NVDA": {
+        "total_return": -0.00979287,
+        "sharpe": -3.528219
+      },
+      "CBA.AX": {
+        "total_return": 0.00598959,
+        "sharpe": 4.479975
+      }
+    },
+    "actual": {
+      "AAPL": {
+        "total_return": 0.008545393342898944,
+        "sharpe": 4.768291741641664
+      },
+      "TSLA": {
+        "total_return": -0.0019090502467679071,
+        "sharpe": -0.9071248183436039
+      },
+      "NVDA": {
+        "total_return": -0.009792865630107728,
+        "sharpe": -3.52821880592621
+      },
+      "CBA.AX": {
+        "total_return": 0.0059895939293590494,
+        "sharpe": 4.479975341577389
+      }
+    }
+  },
+  "step_2_corrected_app_default_baseline": {
+    "config_id": "mta_baseline_b0.20_s-0.15",
+    "thresholds": {
+      "buy": 0.2,
+      "sell": -0.15
+    },
+    "actual": {
+      "AAPL": {
+        "total_return": -0.0010800550298788458,
+        "sharpe": -0.3498129320344545
+      },
+      "TSLA": {
+        "total_return": -0.002253371557055517,
+        "sharpe": -0.6789472440533235
+      },
+      "NVDA": {
+        "total_return": -0.009580940875558164,
+        "sharpe": -2.7328278078649983
+      },
+      "CBA.AX": {
+        "total_return": 0.0007059340474764308,
+        "sharpe": 0.38648093691606833
+      }
+    }
+  }
+}

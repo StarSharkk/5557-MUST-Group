@@ -1,0 +1,171 @@
+{
+  "run_timestamp": "2026-07-19T12:38:30.600404+00:00",
+  "source_scan": "analysis_results\\scan_20260718_1602",
+  "source": "Yahoo Finance via yfinance",
+  "period_requested": "60d",
+  "interval": "5m",
+  "evaluation_days": 30,
+  "tickers": [
+    "AAPL",
+    "TSLA",
+    "NVDA",
+    "CBA.AX"
+  ],
+  "fixed_assumptions": {
+    "initial_capital": 100000.0,
+    "position_size": 0.2,
+    "transaction_cost_bps_per_side": 2.0,
+    "max_hold_bars": 24,
+    "horizon_bars": 1,
+    "stop_loss_mult": 1.5,
+    "take_profit_mult": 3.0,
+    "news_score": 0.0,
+    "news_weight": 0.15,
+    "momentum_weight": 0.4,
+    "mean_reversion_weight": 0.35,
+    "flow_weight": 0.25,
+    "volatility_weight": 0.35
+  },
+  "grid": {
+    "profiles": {
+      "baseline": [
+        0.35,
+        0.35,
+        0.15,
+        0.15
+      ],
+      "technical_heavy": [
+        0.55,
+        0.2,
+        0.15,
+        0.1
+      ],
+      "factor_heavy": [
+        0.2,
+        0.55,
+        0.15,
+        0.1
+      ],
+      "risk_heavy": [
+        0.28,
+        0.27,
+        0.15,
+        0.3
+      ],
+      "technical_factor_no_risk": [
+        0.42,
+        0.43,
+        0.15,
+        0.0
+      ],
+      "uniform": [
+        0.28,
+        0.28,
+        0.15,
+        0.29
+      ]
+    },
+    "thresholds": [
+      [
+        "default",
+        0.2,
+        -0.15
+      ],
+      [
+        "round1_mislabelled",
+        0.35,
+        -0.35
+      ],
+      [
+        "strict",
+        0.5,
+        -0.35
+      ]
+    ],
+    "configuration_count": 18
+  },
+  "tickers_data": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "0a50471f057a0e492d14f32c2d09ddbab35425e122d522f5a182b4eb49e4a3bc",
+      "status": "frozen_verified",
+      "indicator_bars": 4656,
+      "evaluation_bars": 1560,
+      "sha256_verified": true,
+      "snapshot_file": "AAPL_ohlcv.csv"
+    },
+    "TSLA": {
+      "ticker": "TSLA",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "86b59cd1754e82be940b85e6f46b3c422af7fa4e86c6264dad2b37f736e8c619",
+      "status": "frozen_verified",
+      "indicator_bars": 4656,
+      "evaluation_bars": 1561,
+      "sha256_verified": true,
+      "snapshot_file": "TSLA_ohlcv.csv"
+    },
+    "NVDA": {
+      "ticker": "NVDA",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4680,
+      "first_bar": "2026-04-22 09:30:00-04:00",
+      "last_bar": "2026-07-17 15:55:00-04:00",
+      "evaluation_cutoff": "2026-06-17 15:55:00-04:00",
+      "sha256": "d58a33ac8744c19358390d743277a43d62b394425553f65938f967692fe0e978",
+      "status": "frozen_verified",
+      "indicator_bars": 4646,
+      "evaluation_bars": 1561,
+      "sha256_verified": true,
+      "snapshot_file": "NVDA_ohlcv.csv"
+    },
+    "CBA.AX": {
+      "ticker": "CBA.AX",
+      "source": "Yahoo Finance via yfinance",
+      "period_requested": "60d",
+      "interval": "5m",
+      "bars": 4385,
+      "first_bar": "2026-04-24 10:00:00+10:00",
+      "last_bar": "2026-07-17 16:10:00+10:00",
+      "evaluation_cutoff": "2026-06-17 16:10:00+10:00",
+      "sha256": "0015215685a06d9fa39e8d02f0dfd3f10b90ab425a5b90f113f7625140e36493",
+      "status": "frozen_verified",
+      "indicator_bars": 4297,
+      "evaluation_bars": 1588,
+      "sha256_verified": true,
+      "snapshot_file": "CBA_AX_ohlcv.csv"
+    }
+  },
+  "historical_round1_expected": {
+    "AAPL": {
+      "total_return": 0.00854539,
+      "sharpe": 4.768292
+    },
+    "TSLA": {
+      "total_return": -0.00190905,
+      "sharpe": -0.907125
+    },
+    "NVDA": {
+      "total_return": -0.00979287,
+      "sharpe": -3.528219
+    },
+    "CBA.AX": {
+      "total_return": 0.00598959,
+      "sharpe": 4.479975
+    }
+  }
+}
