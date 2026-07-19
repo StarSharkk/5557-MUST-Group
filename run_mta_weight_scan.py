@@ -45,7 +45,7 @@ FACTOR_WEIGHTS = {
 # The requested Manager-threshold grid.  TEAM_* are the current app defaults.
 THRESHOLD_GRID = [
     ("default", 0.20, -0.15),
-    ("wide", 0.35, -0.25),
+    ("round1_mislabelled", 0.35, -0.35),
     ("strict", 0.50, -0.35),
 ]
 
@@ -58,11 +58,11 @@ WEIGHT_PROFILES = {
     "uniform": (0.28, 0.28, 0.15, 0.29),
 }
 
-EXPECTED_BASELINE = {
-    "AAPL": {"total_return": 0.0085, "sharpe": 4.77},
-    "TSLA": {"total_return": -0.0019, "sharpe": -0.91},
-    "NVDA": {"total_return": -0.0098, "sharpe": -3.53},
-    "CBA.AX": {"total_return": 0.0060, "sharpe": 4.48},
+EXPECTED_ROUND1 = {
+    "AAPL": {"total_return": 0.00854539, "sharpe": 4.768292},
+    "TSLA": {"total_return": -0.00190905, "sharpe": -0.907125},
+    "NVDA": {"total_return": -0.00979287, "sharpe": -3.528219},
+    "CBA.AX": {"total_return": 0.00598959, "sharpe": 4.479975},
 }
 
 
@@ -241,21 +241,30 @@ def evaluate_one_window(
     return row, trade_rows
 
 
-def baseline_self_check(data_by_ticker: Dict[str, Tuple[pd.DataFrame, pd.DatetimeIndex, Dict[str, Any]]], configs: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
-    baseline = next(item for item in configs if item["config_id"] == "mta_baseline_b0.20_s-0.15")
-    actual: Dict[str, Dict[str, float]] = {}
+def baseline_self_check(
+    data_by_ticker: Dict[str, Tuple[pd.DataFrame, pd.DatetimeIndex, Dict[str, Any]]],
+    configs: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    historical = next(item for item in configs if item["config_id"] == "mta_baseline_b0.35_s-0.35")
+    corrected = next(item for item in configs if item["config_id"] == "mta_baseline_b0.20_s-0.15")
+    historical_actual: Dict[str, Dict[str, float]] = {}
     failures: List[str] = []
     for ticker, (data, evaluation_index, _) in data_by_ticker.items():
-        row, _ = evaluate_one_window(ticker, data, "evaluation_full", evaluation_index, baseline)
-        actual[ticker] = {"total_return": float(row["total_return"]), "sharpe": float(row["sharpe"])}
-        expected = EXPECTED_BASELINE[ticker]
-        if not math.isclose(actual[ticker]["total_return"], expected["total_return"], abs_tol=5e-6):
-            failures.append(f"{ticker} total_return {actual[ticker]['total_return']:.8f} != {expected['total_return']:.8f}")
-        if not math.isclose(actual[ticker]["sharpe"], expected["sharpe"], abs_tol=0.02):
-            failures.append(f"{ticker} sharpe {actual[ticker]['sharpe']:.6f} != {expected['sharpe']:.6f}")
+        row, _ = evaluate_one_window(ticker, data, "evaluation_full", evaluation_index, historical)
+        historical_actual[ticker] = {"total_return": float(row["total_return"]), "sharpe": float(row["sharpe"])}
+        expected = EXPECTED_ROUND1[ticker]
+        if not math.isclose(historical_actual[ticker]["total_return"], expected["total_return"], abs_tol=5e-6):
+            failures.append(f"{ticker} total_return {historical_actual[ticker]['total_return']:.8f} != {expected['total_return']:.8f}")
+        if not math.isclose(historical_actual[ticker]["sharpe"], expected["sharpe"], abs_tol=0.02):
+            failures.append(f"{ticker} sharpe {historical_actual[ticker]['sharpe']:.6f} != {expected['sharpe']:.6f}")
     if failures:
-        raise RuntimeError("BASELINE SELF-CHECK FAILED; scan aborted: " + "; ".join(failures))
-    return actual
+        raise RuntimeError("STEP 1 HISTORICAL SELF-CHECK FAILED; scan aborted: " + "; ".join(failures))
+
+    corrected_actual: Dict[str, Dict[str, float]] = {}
+    for ticker, (data, evaluation_index, _) in data_by_ticker.items():
+        row, _ = evaluate_one_window(ticker, data, "evaluation_full", evaluation_index, corrected)
+        corrected_actual[ticker] = {"total_return": float(row["total_return"]), "sharpe": float(row["sharpe"])}
+    return historical_actual, corrected_actual
 
 
 def better(value: float, baseline: float) -> bool:
@@ -342,7 +351,8 @@ def write_summary(
     full_matrix: pd.DataFrame,
     window_matrix: pd.DataFrame,
     aggregate: pd.DataFrame,
-    baseline_actual: Dict[str, Dict[str, float]],
+    historical_actual: Dict[str, Dict[str, float]],
+    corrected_baseline_actual: Dict[str, Dict[str, float]],
 ) -> None:
     lines = [
         "# Mini TradingAgents weight and Manager-threshold scan summary",
@@ -350,17 +360,25 @@ def write_summary(
         "This second-round scan reuses the SHA-256-verified frozen snapshots from `analysis_results/scan_20260718_1602`; it never downloads new market data.",
         "The first-round methodology is unchanged: recent 30-day evaluation after causal pre-roll, 2 bps per side, one-bar signal delay, long-only execution, adaptive risk limits, and force-closing at the evaluation-window end.",
         "",
-        "## Frozen-data verification and baseline self-check",
+        "## Frozen-data verification and two-step self-check",
         "",
         "All four source snapshot hashes matched the first-round `data_manifest.json` before loading.",
-        "The baseline configuration uses team weights 0.35/0.35/0.15/0.15 and Manager thresholds 0.20/-0.15. The scan was allowed to proceed only after the known first-round values were reproduced:",
+        "Step 1 uses the historical first-round threshold pair 0.35/-0.35 and must reproduce the archived figures. Only after Step 1 passes does Step 2 evaluate the corrected app-default baseline at 0.20/-0.15. Both steps use team weights 0.35/0.35/0.15/0.15.",
         "",
-        "| Ticker | Total return | Sharpe |",
-        "|---|---:|---:|",
+        "| Ticker | Step 1 historical return | Step 1 Sharpe | Step 2 corrected return | Step 2 Sharpe |",
+        "|---|---:|---:|---:|---:|",
     ]
     for ticker in TICKERS:
-        lines.append(f"| {ticker} | {baseline_actual[ticker]['total_return']:+.2%} | {baseline_actual[ticker]['sharpe']:.2f} |")
+        lines.append(
+            f"| {ticker} | {historical_actual[ticker]['total_return']:+.2%} | {historical_actual[ticker]['sharpe']:.2f} | {corrected_baseline_actual[ticker]['total_return']:+.2%} | {corrected_baseline_actual[ticker]['sharpe']:.2f} |"
+        )
     lines += [
+        "",
+        "## Threshold mislabeling in round 1",
+        "",
+        "An audit of the first-round configuration builder found that Mini TradingAgents rows were assigned `MULTIFACTOR_BUY_THRESHOLD=0.35` and `MULTIFACTOR_SELL_THRESHOLD=-0.35`, although the app's real team/Manager defaults are `TEAM_BUY_THRESHOLD=0.20` and `TEAM_SELL_THRESHOLD=-0.15`. The first-round archive is retained unchanged as a historical record.",
+        "",
+        "This mislabeling affects the first-round Mini TradingAgents baseline table: the archived figures are valid for the historical 0.35/-0.35 execution path, but they must not be labelled as the app-default 0.20/-0.15 baseline. Step 1 documents the historical reproduction; Step 2 records the corrected baseline used for this scan. Treating the discrepancy explicitly makes the experiment auditable and does not alter the archived files.",
         "",
         "## Fixed news constraint",
         "",
@@ -373,6 +391,7 @@ def write_summary(
         "",
         "## Declared grid",
         "",
+        "Manager threshold pairs are 0.20/-0.15 (corrected baseline), 0.35/-0.35 (round-1 mislabelled pair promoted to a test configuration), and 0.50/-0.35.",
         "The scan contains exactly 18 configurations: six team-weight profiles multiplied by three Manager buy/sell threshold pairs. Stop-loss is fixed at 1.5σ, take-profit at 3σ, factor weights at 0.40/0.35/0.25 with volatility weight 0.35, and news weight at 0.15.",
         "",
         "## Complete full-window configuration list",
@@ -414,6 +433,21 @@ def write_summary(
         lines.append("Mini TradingAgents 是否存在跨股票稳定的权重改进: 有候选。The configurations listed below passed the unchanged cross-stock rule in at least three of the four repeated windows; they remain frozen-sample candidates rather than claims of future profitability.")
         for _, row in stable.sort_values("stable_windows", ascending=False).iterrows():
             lines.append(f"- `{row['config_id']}`: stable in `{int(row['stable_windows'])}/4` windows; mean pooled PF `{row['mean_pooled_profit_factor']:.3f}`; mean Sharpe delta `{row['mean_sharpe_delta_all_cells']:.3f}`.")
+    lines = [
+        (
+            "Mini TradingAgents stable improvement across stocks: none. No configuration passed the unchanged cross-stock rule in at least three of the four repeated evaluation windows. This is a valid result: the expanded weight and threshold coverage did not produce evidence of a stable improvement over the corrected baseline in this frozen sample."
+            if "No configuration passed" in line
+            else "Mini TradingAgents stable improvement across stocks: candidates listed below passed the unchanged cross-stock rule in at least three of the four repeated windows; they remain frozen-sample candidates rather than claims of future profitability."
+            if "The configurations listed below" in line
+            else line
+        )
+        for line in lines
+    ]
+    lines = [line.replace("\ufffd\ufffd", "σ").replace("蟽", "σ") for line in lines]
+    lines = [
+        line.replace(chr(0xfffd) * 2, chr(0x03c3)).replace(chr(0x87fd), chr(0x03c3))
+        for line in lines
+    ]
     lines += [
         "",
         "The complete configuration-by-stock matrix is in `parameter_stock_matrix.csv`; all four sub-window rows are in `parameter_window_summary.csv`; aggregate repeated-window evidence is in `parameter_aggregate_summary.csv`; every completed trade is in `all_trades.csv`.",
@@ -461,11 +495,30 @@ def run(output_dir: Path) -> None:
         metadata["status"] = "frozen_verified"
         manifest["tickers_data"][ticker] = metadata
         data_by_ticker[ticker] = (data, evaluation_index, metadata)
-    manifest["baseline_expected"] = EXPECTED_BASELINE
+    manifest["historical_round1_expected"] = EXPECTED_ROUND1
     (output_dir / "data_manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
 
-    baseline_actual = baseline_self_check(data_by_ticker, configs)
-    (output_dir / "baseline_self_check.json").write_text(json.dumps({"status": "passed", "actual": baseline_actual}, indent=2), encoding="utf-8")
+    historical_actual, corrected_baseline_actual = baseline_self_check(data_by_ticker, configs)
+    (output_dir / "baseline_self_check.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "step_1_historical_round1_reproduction": {
+                    "config_id": "mta_baseline_b0.35_s-0.35",
+                    "thresholds": {"buy": 0.35, "sell": -0.35},
+                    "expected": EXPECTED_ROUND1,
+                    "actual": historical_actual,
+                },
+                "step_2_corrected_app_default_baseline": {
+                    "config_id": "mta_baseline_b0.20_s-0.15",
+                    "thresholds": {"buy": 0.20, "sell": -0.15},
+                    "actual": corrected_baseline_actual,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     long_rows: List[Dict[str, Any]] = []
     trade_rows: List[Dict[str, Any]] = []
@@ -488,7 +541,16 @@ def run(output_dir: Path) -> None:
     window_matrix.to_csv(output_dir / "parameter_window_summary.csv", index=False)
     aggregate.to_csv(output_dir / "parameter_aggregate_summary.csv", index=False)
     trades_df.to_csv(output_dir / "all_trades.csv", index=False)
-    write_summary(output_dir, manifest, configs, full_matrix, window_matrix, aggregate, baseline_actual)
+    write_summary(
+        output_dir,
+        manifest,
+        configs,
+        full_matrix,
+        window_matrix,
+        aggregate,
+        historical_actual,
+        corrected_baseline_actual,
+    )
     print(json.dumps({"output_dir": str(output_dir), "configs": len(configs), "long_rows": len(long_df), "trades": len(trades_df), "baseline_self_check": "passed"}, indent=2))
 
 
