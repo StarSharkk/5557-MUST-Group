@@ -8,6 +8,8 @@ The project deliberately reports honest results, including negative ones: the da
 
 ![Dashboard](docs/screenshots/01-dashboard.png)
 
+*Screenshots in this README were captured from the deployed app at https://5557-must-group.streamlit.app/. Because it re-downloads current market data on every run, the figures shown will differ from run to run.*
+
 ## Features
 
 - Tickers: AAPL, TSLA, NVDA, CBA.AX
@@ -79,7 +81,7 @@ Streamlit prints a local URL (default http://localhost:8501) and opens it in you
 
 ![ML Classifier diagnostics](docs/screenshots/02-ml-diagnostics.png)
 
-In the screenshot above the Random Forest reaches 55.6% walk-forward out-of-sample accuracy with an F1 of 0.39, across 7 folds covering 86.9% of the evaluation window — while the same run's total return is negative. This is the core lesson the app is built to demonstrate: **prediction accuracy does not imply trading profit.**
+In the screenshot above the Random Forest reaches 55.5% walk-forward out-of-sample accuracy with an F1 of 0.39, across 7 folds covering 86.9% of the evaluation window — while the same run's total return is negative. This is the core lesson the app is built to demonstrate: **prediction accuracy does not imply trading profit.**
 
 ### Worked example 2 — inspect why an individual trade lost money
 
